@@ -1,0 +1,62 @@
+# ============================================
+# NX12 NXOpen C++ Projects - Git Ignore Rules
+# ============================================
+
+# Visual Studio 缓存与临时文件
+.vs/
+*.suo
+*.user
+*.userosscache
+*.suo
+*.ipch
+*.db
+*.opendb
+*.VC.db
+*.VC.opendb
+
+# 编译输出目录
+x64/
+Debug/
+Release/
+bin/
+*.tlog/
+
+# 编译产物
+*.obj
+*.pdb
+*.dll
+*.lib
+*.exp
+*.ilk
+*.map
+*.iobj
+*.ipdb
+
+# 构建日志与临时文件
+*.log
+*.lastbuildstate
+*.cache
+*.unsuccessfulbuild
+
+# Visual Studio 项目临时文件
+*.aps
+*.ncb
+*.opensdf
+*.sdf
+*.cachefile
+*.TMP
+
+# 调试符号
+*.bsc
+*.cod
+*.int
+*.idb
+
+# 其他
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# 旧 git 备份目录（合并仓库前的子项目 .git）
+.git_bak/

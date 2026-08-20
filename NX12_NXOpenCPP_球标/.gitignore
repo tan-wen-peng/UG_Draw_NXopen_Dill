@@ -1,0 +1,17 @@
+# Build output
+bin/
+Release/
+Debug/
+x64/
+
+# VS user files
+.vs/
+*.vcxproj.user
+
+# Temp
+*.obj
+*.pdb
+*.idb
+*.ilk
+*.exp
+*.lib

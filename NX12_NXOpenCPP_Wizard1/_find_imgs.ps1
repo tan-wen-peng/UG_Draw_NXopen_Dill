@@ -1,0 +1,1 @@
+﻿Get-ChildItem -Path 'e:\UG\NX12_NXOpenCPP_Wizard1','d:\A_UG\02_study' -Recurse -File -Include *.bmp,*.png,*.jpg,*.jpeg,*.gif,*.tif,*.tiff | ForEach-Object { [pscustomobject]@{Name=.Name; Full=.FullName; Len=.Length; Last=.LastWriteTime; Match000=(.Name -match '000')} } | Format-Table -AutoSize
