@@ -23,12 +23,11 @@ if (Test-Path $men) {
     Check 'topbar cascade (BEFORE UG_HELP)' ($t -match 'BEFORE UG_HELP') ''
     Check 'application button' ($t -match 'APPLICATION_BUTTON TWP_TOOLBOX') ''
     Check 'LIBRARIES titleblock_fill' ($t -match 'LIBRARIES titleblock_fill') ''
-    Check 'gateway preload block' ($t -match 'MODIFY') ''
+    Check 'no startup auto-load (no MODIFY statement)' ($t -notmatch 'END_OF_MODIFY') 'startup must not preload DLLs'
 } else { Check 'startup\twp_toolbox.men exists' $false 'missing' }
 
-# 2) placeholders
+# 2) placeholder
 Check 'twp_toolbox_app.men exists' (Test-Path (Join-Path $app 'twp_toolbox_app.men')) ''
-Check 'twp_gateway_append.men exists' (Test-Path (Join-Path $app 'twp_gateway_append.men')) ''
 
 # 3) DLLs vs ACTIONS in the menu file
 $t = [System.Text.Encoding]::GetEncoding(936).GetString([System.IO.File]::ReadAllBytes($men))

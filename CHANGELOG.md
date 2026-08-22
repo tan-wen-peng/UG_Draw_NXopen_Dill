@@ -2,6 +2,16 @@
 
 本文件记录 E:\UG（UG_Draw_NXopen_Dill）的发布历史。版本规则：vMAJOR.MINOR.PATCH。
 
+## [1.0.2] - 2026-08-22 —— 注册层安全回退（启动零代码执行）
+
+- 移除 startup 阶段的 MODIFY UG_APP_GATEWAY + LIBRARIES titleblock_fill 自动加载
+  （避免未经验证的 DLL 在 NX 启动早期被加载，彻底排除注册层对 NX 启动与既有功能的影响）。
+- 标题栏三个动作改为官方 MenuBarCppApp 范式：点击「应用模块→twp工具箱」按钮时加载注册。
+- 删除 application\twp_gateway_append.men；更新 README 与 twp_verify.ps1 体检项。
+- 核实结论：E:\UG 全部工具源码中没有任何"尺寸公差切换"相关逻辑
+  （公差仅涉及 Step2 的公差文本字体/字高/宽高比设置与球标的公差文本样式），
+  Step1-7 本轮仅重新链接、0 个函数重编译，功能与 8/19 版本完全一致。
+
 ## [1.0.1] - 2026-08-22 —— Step8 标题框填写 v3 全诊断修复版
 
 ### 问题

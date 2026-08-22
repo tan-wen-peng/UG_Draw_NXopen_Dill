@@ -1,24 +1,25 @@
 !*=======================================================================
 !   twp工具箱 - NX12 统一菜单注册文件 (MenuScript VERSION 120)
 !
-!   架构（三件套，全部复用本机已验证的官方/现成范式）：
-!   1) MODIFY UG_APP_GATEWAY + LIBRARIES titleblock_fill
-!      -> NX 会话启动进入 Gateway 时即加载 titleblock_fill.dll，
-!         其 ufsta 注册三个动作：TITLEFILL_APP__fill_date / _fill_partno / _fill_both
-!      （范式出处：NX12 官方 startup 样例 nx_china_main_menu.men、
-!        UGOPEN\ufx_menuscript_startup.men）
-!   2) BEFORE UG_HELP + CASCADE_BUTTON + END_OF_AFTER
+!   架构（全部复用本机已验证的官方/现成范式，启动时不执行任何用户代码）：
+!   1) BEFORE UG_HELP + CASCADE_BUTTON + END_OF_AFTER
 !      -> 主菜单栏常驻入口"twp工具箱"，启动即可见、无需点击应用模块
 !      （范式出处：本机星空外挂 D:\QuickCAM\Startup\QuickCAM.men，已验证可用）
-!   3) MENU UG_APPLICATION + APPLICATION_BUTTON TWP_TOOLBOX
-!      -> 同时注册到"应用模块/应用程序"列表（官方 MenuBarCppApp 范式），
-!         激活后加载 titleblock_fill（已加载则跳过）并解析 twp_toolbox_app.men
+!   2) MENU UG_APPLICATION + APPLICATION_BUTTON TWP_TOOLBOX
+!      -> 同时注册到"应用模块/应用程序"列表（官方 MenuBarCppApp 范式）。
+!         激活该按钮时 NX 才加载 LIBRARIES titleblock_fill（ufsta 注册
+!         TITLEFILL_APP__* 三个动作）并解析 twp_toolbox_app.men
+!      （范式出处：NX12 官方 UGOPEN\SampleNXOpenApplications\C++\MenuBarCppApp）
+!
+!   注意：不在 startup 阶段用 MODIFY UG_APP_GATEWAY 自动加载 DLL ——
+!   避免任何未经验证的 DLL 在 NX 启动早期被加载而影响启动/界面状态。
 !
 !   ACTIONS 约定：
 !   - 纯 ufusr 工具：ACTIONS 直接写磁盘上的 DLL 文件名（含 .dll 后缀），
 !     NX 点击按钮时加载该 DLL 并调用 ufusr
 !   - 标题栏工具：ACTIONS 写 titleblock_fill.dll 的 ufsta 注册的动作名
-!     （与 NX12_Step8_TitleBlockFill.cpp 中 AddMenuAction 的字面量逐字一致）
+!     （与 NX12_Step8_TitleBlockFill.cpp 中 AddMenuAction 的字面量逐字一致）；
+!     首次使用前请先在"应用模块"页签点击一次 twp工具箱 按钮完成注册
 !
 !   编码：GBK/ANSI(代码页936)、无 BOM、CRLF。NX12 下 UTF-8 会显示乱码。
 !   DLL 存放位置：application 目录（NX 的 LIBRARIES/ACTIONS 按 startup/application 约定查找）。
@@ -28,16 +29,7 @@ VERSION 120
 EDIT UG_GATEWAY_MAIN_MENUBAR
 
 !-----------------------------------------------------------------------
-! 1) Gateway 进入时加载 titleblock_fill.dll（会话启动即注册标题栏动作）
-!-----------------------------------------------------------------------
-MODIFY
-    APPLICATION_BUTTON UG_APP_GATEWAY
-    LIBRARIES titleblock_fill
-    MENU_FILES/APPEND twp_gateway_append.men
-END_OF_MODIFY
-
-!-----------------------------------------------------------------------
-! 2) 主菜单栏常驻级联入口 "twp工具箱"（位于 帮助 菜单之前）
+! 1) 主菜单栏常驻级联入口 "twp工具箱"（位于 帮助 菜单之前）
 !-----------------------------------------------------------------------
 BEFORE UG_HELP
     CASCADE_BUTTON TWP_TOOLBOX_MENU
@@ -45,7 +37,7 @@ BEFORE UG_HELP
 END_OF_AFTER
 
 !-----------------------------------------------------------------------
-! 3) 应用模块按钮（Applications 页签中的辅助入口，官方范式）
+! 2) 应用模块按钮（Applications 页签；点击后加载 titleblock_fill 注册标题栏动作）
 !-----------------------------------------------------------------------
 MENU UG_APPLICATION
 
@@ -60,7 +52,7 @@ MENU UG_APPLICATION
 END_OF_MENU
 
 !-----------------------------------------------------------------------
-! 4) 工具箱菜单树（全部内联在 startup 文件中，启动即解析）
+! 3) 工具箱菜单树（全部内联在 startup 文件中，启动即解析）
 !-----------------------------------------------------------------------
 MENU TWP_TOOLBOX_MENU
 
