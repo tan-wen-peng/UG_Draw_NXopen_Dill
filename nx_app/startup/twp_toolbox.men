@@ -1,0 +1,147 @@
+!*=======================================================================
+!   twp工具箱 - NX12 统一菜单注册文件 (MenuScript VERSION 120)
+!
+!   架构（三件套，全部复用本机已验证的官方/现成范式）：
+!   1) MODIFY UG_APP_GATEWAY + LIBRARIES titleblock_fill
+!      -> NX 会话启动进入 Gateway 时即加载 titleblock_fill.dll，
+!         其 ufsta 注册三个动作：TITLEFILL_APP__fill_date / _fill_partno / _fill_both
+!      （范式出处：NX12 官方 startup 样例 nx_china_main_menu.men、
+!        UGOPEN\ufx_menuscript_startup.men）
+!   2) BEFORE UG_HELP + CASCADE_BUTTON + END_OF_AFTER
+!      -> 主菜单栏常驻入口"twp工具箱"，启动即可见、无需点击应用模块
+!      （范式出处：本机星空外挂 D:\QuickCAM\Startup\QuickCAM.men，已验证可用）
+!   3) MENU UG_APPLICATION + APPLICATION_BUTTON TWP_TOOLBOX
+!      -> 同时注册到"应用模块/应用程序"列表（官方 MenuBarCppApp 范式），
+!         激活后加载 titleblock_fill（已加载则跳过）并解析 twp_toolbox_app.men
+!
+!   ACTIONS 约定：
+!   - 纯 ufusr 工具：ACTIONS 直接写磁盘上的 DLL 文件名（含 .dll 后缀），
+!     NX 点击按钮时加载该 DLL 并调用 ufusr
+!   - 标题栏工具：ACTIONS 写 titleblock_fill.dll 的 ufsta 注册的动作名
+!     （与 NX12_Step8_TitleBlockFill.cpp 中 AddMenuAction 的字面量逐字一致）
+!
+!   编码：GBK/ANSI(代码页936)、无 BOM、CRLF。NX12 下 UTF-8 会显示乱码。
+!   DLL 存放位置：application 目录（NX 的 LIBRARIES/ACTIONS 按 startup/application 约定查找）。
+!*=======================================================================
+VERSION 120
+
+EDIT UG_GATEWAY_MAIN_MENUBAR
+
+!-----------------------------------------------------------------------
+! 1) Gateway 进入时加载 titleblock_fill.dll（会话启动即注册标题栏动作）
+!-----------------------------------------------------------------------
+MODIFY
+    APPLICATION_BUTTON UG_APP_GATEWAY
+    LIBRARIES titleblock_fill
+    MENU_FILES/APPEND twp_gateway_append.men
+END_OF_MODIFY
+
+!-----------------------------------------------------------------------
+! 2) 主菜单栏常驻级联入口 "twp工具箱"（位于 帮助 菜单之前）
+!-----------------------------------------------------------------------
+BEFORE UG_HELP
+    CASCADE_BUTTON TWP_TOOLBOX_MENU
+    LABEL twp工具箱
+END_OF_AFTER
+
+!-----------------------------------------------------------------------
+! 3) 应用模块按钮（Applications 页签中的辅助入口，官方范式）
+!-----------------------------------------------------------------------
+MENU UG_APPLICATION
+
+    APPLICATION_BUTTON TWP_TOOLBOX
+
+    LABEL twp工具箱
+
+    LIBRARIES titleblock_fill
+
+    MENU_FILES twp_toolbox_app.men
+
+END_OF_MENU
+
+!-----------------------------------------------------------------------
+! 4) 工具箱菜单树（全部内联在 startup 文件中，启动即解析）
+!-----------------------------------------------------------------------
+MENU TWP_TOOLBOX_MENU
+
+    CASCADE_BUTTON TWP_WIZARD_MENU
+    LABEL 制图向导Step1-7
+
+    CASCADE_BUTTON TWP_SPECIAL_MENU
+    LABEL 专项工具
+
+    CASCADE_BUTTON TWP_TITLEBLOCK_MENU
+    LABEL 标题栏填写
+
+END_OF_MENU
+
+! ---- 制图向导 Step1-7 ----
+MENU TWP_WIZARD_MENU
+
+    BUTTON TWP_WIZ_STEP1
+    LABEL 1.新建图纸与视图
+    ACTIONS NX12_Step1_SheetAndViews.dll
+
+    BUTTON TWP_WIZ_STEP2
+    LABEL 2.图纸参数设置
+    ACTIONS NX12_Step2_SheetPreferences.dll
+
+    BUTTON TWP_WIZ_STEP3
+    LABEL 3.坐标标注
+    ACTIONS NX12_Step3_OrdinateDimensions.dll
+
+    BUTTON TWP_WIZ_STEP4
+    LABEL 4.线性标注
+    ACTIONS NX12_Step4_LinearDimensions.dll
+
+    BUTTON TWP_WIZ_STEP5
+    LABEL 5.中心线
+    ACTIONS NX12_Step5_Centerlines.dll
+
+    BUTTON TWP_WIZ_STEP6
+    LABEL 6.图层切换
+    ACTIONS NX12_Step6_LayerSwitch.dll
+
+    BUTTON TWP_WIZ_STEP7
+    LABEL 7.尺寸后缀追加
+    ACTIONS NX12_Step7_AppendSuffix.dll
+
+END_OF_MENU
+
+! ---- 专项工具 ----
+MENU TWP_SPECIAL_MENU
+
+    BUTTON TWP_SP_DBT
+    LABEL 打标图坐标创建
+    ACTIONS dbt_step1.dll
+
+    BUTTON TWP_SP_EXPLODE
+    LABEL 爆炸图自动布局
+    ACTIONS explosion_step1.dll
+
+    BUTTON TWP_SP_EXPLODE_PARAMS
+    LABEL 爆炸参数提取
+    ACTIONS explosion_step2.dll
+
+    BUTTON TWP_SP_BALLOON
+    LABEL 球标标注
+    ACTIONS balloon_step1.dll
+
+END_OF_MENU
+
+! ---- 标题栏填写（动作由 titleblock_fill.dll 的 ufsta 注册） ----
+MENU TWP_TITLEBLOCK_MENU
+
+    BUTTON TWP_TB_DATE
+    LABEL 填日期
+    ACTIONS TITLEFILL_APP__fill_date
+
+    BUTTON TWP_TB_PARTNO
+    LABEL 填零件号
+    ACTIONS TITLEFILL_APP__fill_partno
+
+    BUTTON TWP_TB_BOTH
+    LABEL 全部填写
+    ACTIONS TITLEFILL_APP__fill_both
+
+END_OF_MENU

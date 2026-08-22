@@ -11,7 +11,7 @@ set SOLUTION=%~dp0NX12_MultiModule.sln
 
 echo ========================================
 echo NX12 多模块插件构建
-echo 配置: %CONFIG%|%PLATFORM%
+echo 配置: %CONFIG% %PLATFORM%
 echo ========================================
 
 %MSBUILD% "%SOLUTION%" /p:Configuration=%CONFIG% /p:Platform=%PLATFORM% /m /v:minimal

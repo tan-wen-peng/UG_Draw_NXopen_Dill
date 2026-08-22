@@ -60,3 +60,6 @@ Desktop.ini
 
 # 旧 git 备份目录（合并仓库前的子项目 .git）
 .git_bak/
+
+# 历史调试产物归档目录（确认无用后可整体删除）
+/_archive/

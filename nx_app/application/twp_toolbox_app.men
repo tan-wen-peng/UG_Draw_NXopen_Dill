@@ -1,0 +1,10 @@
+!*=======================================================================
+!   twp_toolbox_app.men - MENU_FILES placeholder
+!   (referenced by the APPLICATION_BUTTON TWP_TOOLBOX block in
+!    startup\twp_toolbox.men)
+!   All menu definitions are inlined in startup\twp_toolbox.men
+!   (QuickCAM-style), so this file intentionally contains no menu blocks:
+!   activating the TWP_TOOLBOX application only triggers the LIBRARIES
+!   titleblock_fill load and adds no duplicate cascade.
+!*=======================================================================
+VERSION 120

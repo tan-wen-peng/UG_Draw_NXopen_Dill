@@ -1,0 +1,9 @@
+!*=======================================================================
+!   twp_gateway_append.men - MENU_FILES/APPEND placeholder
+!   (referenced by the MODIFY UG_APP_GATEWAY block in startup\twp_toolbox.men)
+!   Appends no menu items; it only satisfies the MenuScript
+!   MODIFY APPLICATION_BUTTON ... LIBRARIES ... MENU_FILES/APPEND syntax so
+!   titleblock_fill.dll loads when NX enters Gateway (session start),
+!   making the three TITLEFILL_APP__* actions available immediately.
+!*=======================================================================
+VERSION 120
