@@ -98,6 +98,10 @@ MENU TWP_WIZARD_MENU
     LABEL 7.尺寸后缀追加
     ACTIONS NX12_Step7_AppendSuffix.dll
 
+    BUTTON TWP_WIZ_STEP9
+    LABEL 9.云线
+    ACTIONS NX12_Step9_CloudLines.dll
+
 END_OF_MENU
 
 ! ---- 专项工具 ----

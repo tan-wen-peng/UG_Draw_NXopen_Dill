@@ -1,4 +1,4 @@
-# twp工具箱 —— NX12 统一菜单部署说明（v1.1）
+# twp工具箱 —— NX12 统一菜单部署说明（v1.4）
 
 将 E:\UG 下的全部 NXOpen C++ 工具统一注册到 NX12，统一入口 **twp工具箱**。
 主入口在 **主菜单栏（帮助 菜单左侧，常驻可见）**；同时在 **应用模块（Applications）页签** 注册了同名应用按钮。
@@ -6,7 +6,7 @@
 
 ---
 
-## 一、工具清单（12 个工具、14 个按钮）
+## 一、工具清单（13 个工具、15 个按钮）
 
 | # | 工具名称 | DLL 文件 | 入口函数/注册方式 | 菜单动作名 ACTIONS | NX 中可加载 | .men 状态 |
 |---|---------|---------|------------------|-------------------|------------|----------|
@@ -17,14 +17,15 @@
 | 5 | 5.中心线 | NX12_Step5_Centerlines.dll | ufusr（直接调用） | NX12_Step5_Centerlines.dll | ✅ | 已注册 |
 | 6 | 6.图层切换 | NX12_Step6_LayerSwitch.dll | ufusr（直接调用） | NX12_Step6_LayerSwitch.dll | ✅ | 已注册 |
 | 7 | 7.尺寸后缀追加 | NX12_Step7_AppendSuffix.dll | ufusr（直接调用） | NX12_Step7_AppendSuffix.dll | ✅ | 已注册 |
-| 8 | 打标图坐标创建 | dbt_step1.dll | ufusr（直接调用） | dbt_step1.dll | ✅ | 已注册 |
-| 9 | 爆炸图自动布局 | explosion_step1.dll | ufusr（直接调用） | explosion_step1.dll | ✅ | 已注册 |
-| 10 | 爆炸参数提取 | explosion_step2.dll | ufusr（直接调用） | explosion_step2.dll | ✅ | 已注册 |
-| 11 | 球标标注 | balloon_step1.dll | ufusr（直接调用） | balloon_step1.dll | ✅ | 已注册 |
-| 12 | 填日期 / 填零件号 / 全部填写 | titleblock_fill.dll | **ufsta + MenuBarManager**（RegisterApplication "TITLEFILL_APP" + AddMenuAction×3，仿官方 MenuBarCppApp） | TITLEFILL_APP__fill_date / TITLEFILL_APP__fill_partno / TITLEFILL_APP__fill_both | ✅ | 已注册 |
+| 8 | 9.云线（草图驱动：矩形/圆形修订云线，直径可调） | NX12_Step9_CloudLines.dll | ufusr（直接调用） | NX12_Step9_CloudLines.dll | ✅ | **待手工追加**（见第五节） |
+| 9 | 打标图坐标创建 | dbt_step1.dll | ufusr（直接调用） | dbt_step1.dll | ✅ | 已注册 |
+| 10 | 爆炸图自动布局 | explosion_step1.dll | ufusr（直接调用） | explosion_step1.dll | ✅ | 已注册 |
+| 11 | 爆炸参数提取 | explosion_step2.dll | ufusr（直接调用） | explosion_step2.dll | ✅ | 已注册 |
+| 12 | 球标标注 | balloon_step1.dll | ufusr（直接调用） | balloon_step1.dll | ✅ | 已注册 |
+| 13 | 填日期 / 填零件号 / 全部填写 | titleblock_fill.dll | **ufsta + MenuBarManager**（RegisterApplication "TITLEFILL_APP" + AddMenuAction×3，仿官方 MenuBarCppApp） | TITLEFILL_APP__fill_date / TITLEFILL_APP__fill_partno / TITLEFILL_APP__fill_both | ✅ | 已注册 |
 
 说明：
-- 前 11 个是纯 ufusr 工具：ACTIONS 直接写磁盘 DLL 文件名，NX 点按钮时加载 DLL 并调用 ufusr，执行完按 ufusr_ask_unload=Immediately 卸载。
+- 前 12 个（含 Step9 云线）是纯 ufusr 工具：ACTIONS 直接写磁盘 DLL 文件名，NX 点按钮时加载 DLL 并调用 ufusr，执行完按 ufusr_ask_unload=Immediately 卸载。
 - titleblock_fill.dll 是 MenuBar 型应用：动作名在 NX12_Step8_TitleBlockFill.cpp 的 ufsta 中通过 AddMenuAction("TITLEFILL_APP__...") 注册，.men 中 ACTIONS 必须与其**逐字一致**；ufusr_ask_unload 固定返回 AtTermination。
   **首次使用「标题栏填写」前，请先到「应用模块」页签点击一次 twp工具箱 按钮**（触发 LIBRARIES 加载并注册动作），此后三个按钮即可正常使用。
 - 旧的整体式 NX12_NXOpenCPP_Wizard1.dll（2026-08-07）已被 Step1-7 多模块版取代，不再注册。
@@ -34,14 +35,15 @@
 ```
 NX 主菜单栏（帮助 左侧，常驻）
 └── twp工具箱
-    ├── 制图向导Step1-7
+    ├── 制图向导Step1-9
     │   ├── 1.新建图纸与视图      → NX12_Step1_SheetAndViews.dll
     │   ├── 2.图纸参数设置        → NX12_Step2_SheetPreferences.dll
     │   ├── 3.坐标标注            → NX12_Step3_OrdinateDimensions.dll
     │   ├── 4.线性标注            → NX12_Step4_LinearDimensions.dll
     │   ├── 5.中心线              → NX12_Step5_Centerlines.dll
     │   ├── 6.图层切换            → NX12_Step6_LayerSwitch.dll
-    │   └── 7.尺寸后缀追加        → NX12_Step7_AppendSuffix.dll
+    │   ├── 7.尺寸后缀追加        → NX12_Step7_AppendSuffix.dll
+    │   └── 9.云线（草图驱动，直径可调） → NX12_Step9_CloudLines.dll（待追加）
     ├── 专项工具
     │   ├── 打标图坐标创建        → dbt_step1.dll
     │   ├── 爆炸图自动布局        → explosion_step1.dll
@@ -60,8 +62,8 @@ NX 主菜单栏（帮助 左侧，常驻）
 ```
 E:\UG\nx_app\                       ← 挂载根目录（已写入 custom_dirs.dat）
 ├── startup\twp_toolbox.men           ← 唯一注册文件（顶部级联 + 应用按钮 + 全部菜单树；启动不加载任何 DLL）
-├── application\                      ← 12 个 DLL + 数据文件（NX 按 startup/application 约定查找）
-│   ├── NX12_Step1~7_*.dll（7 个）
+├── application\                      ← 13 个 DLL + 数据文件（NX 按 startup/application 约定查找；Step9 云线 DLL 构建部署后计入）
+│   ├── NX12_Step1~7_*.dll + NX12_Step9_CloudLines.dll（8 个制图向导 DLL）
 │   ├── titleblock_fill.dll
 │   ├── dbt_step1.dll  explosion_step1.dll  explosion_step2.dll  balloon_step1.dll
 │   ├── explosion_params.txt          ← 爆炸参数提取的数据文件，必须与 DLL 同目录
@@ -110,7 +112,7 @@ $t   # 应能正常显示中文；文件前 3 字节不能是 EF BB BF
 ```bat
 E:\UG\build_and_deploy.bat
 ```
-- 依次构建：Wizard1 多模块（8 个 DLL）、打标图、爆炸图、爆炸参数、球标（Release x64）。
+- 依次构建：Wizard1 多模块（9 个 DLL，含 Step9 云线）、打标图、爆炸图、爆炸参数、球标（Release x64）。
 - 输出位置：各项目 bin\Release\ / x64\Release\，脚本随后自动复制到 E:\UG\nx_app\application\。
 - 手工构建时注意：NX12_NXOpenCPP_打标图 项目用 $(UGII_BASE_DIR) 属性，需传入 /p:UGII_BASE_DIR="D:\Program Files\Siemens\NX 12.0"（脚本已处理）。
 
@@ -120,7 +122,7 @@ E:\UG\build_and_deploy.bat
 2. 平时方式启动 NX12（双击桌面图标即可；环境变量已配好）。
    - 备选：双击 E:\UG\nx_app\start_nx12_twp.bat 隔离启动（只挂本工具箱，用于排障对照）。
 3. **验证入口**：主菜单栏最右侧（帮助 左侧）应出现 **twp工具箱** 级联菜单；「应用模块」页签应出现 **twp工具箱** 按钮。
-4. 展开三级菜单，核对 14 个按钮中文无乱码。
+4. 展开三级菜单，核对 15 个按钮中文无乱码（Step9 云线按钮待手工追加后为 15 个）。
 5. 抽查：点「1.新建图纸与视图」确认向导启动；标题栏工具先点一次应用模块按钮再点「填日期/填零件号/全部填写」。
 6. 排障日志：NX「文件→帮助→日志文件」，或 %LOCALAPPDATA%\Temp\*.syslog，搜索 MB_LOADED_MENU_FILE twp、titleblock_fill、MB_LIBRARY_LOAD_FAILED。
 7. 一键体检：powershell -ExecutionPolicy Bypass -File E:\UG\nx_app\twp_verify.ps1
@@ -160,7 +162,7 @@ ACTIONS 新工具DLL名.dll
 
 ## 九、缺失内容与最小补全方案（现状评估）
 
-- **已完整**：12 个工具全部有源码、可编译、DLL 已部署、菜单已注册。
+- **已完整**：13 个工具全部有源码、可编译；其中 12 个已部署并注册菜单，Step9 云线 DLL 待构建部署 + 按第五节追加菜单按钮。
 - **未做（不影响使用，按需补）**：
   1. 工具栏图标/位图（BITMAP）：当前为纯文字菜单，无图标。
   2. NX2206 专用重编译：DLL 按 NX12 头文件编译，在 NX2206 使用前应针对其 UGOPEN 重新编译（挂载点已就绪）。

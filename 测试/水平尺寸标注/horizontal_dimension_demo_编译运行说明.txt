@@ -1,0 +1,62 @@
+水平尺寸标注演示 —— 编译与运行说明
+=====================================
+
+一、交付内容
+------------
+1. horizontal_dimension_demo.cpp
+   完全独立的单文件学习示例，演示 NX12 创建“水平尺寸标注”：
+   - 方法 A：NXOpen C++ LinearDimensionBuilder（NX12 真实 API，已按本机
+     头文件 UGOPEN\NXOpen\Annotations_LinearDimensionBuilder.hxx 等核实）；
+   - 方法 B：UF_DRF_create_horizontal_dim（UF 对照实现，签名已核实）。
+2. 本说明文件。
+
+二、编译（VS2017 x64 命令行）
+-----------------------------
+先初始化编译环境（一次性）：
+  "D:\Program Files (x86)\Microsoft Visual Studio\2017\Community\VC\Auxiliary\Build\vcvars64.bat"
+
+然后在源码所在目录执行：
+  cl /nologo /EHsc /W3 /LD /utf-8 horizontal_dimension_demo.cpp ^
+     /I "D:\Program Files\Siemens\NX 12.0\UGOPEN" ^
+     /link /LIBPATH:"D:\Program Files\Siemens\NX 12.0\UGOPEN" ^
+           libufun.lib libnxopencpp.lib libnxopencpp_annotations.lib ^
+           libnxopencpp_drawings.lib
+
+要点：
+- /utf-8 必须：源码含中文注释；
+- NX12 的 NXOpen C++ 头文件与所有导入库都在安装目录的 UGOPEN 文件夹下，
+  一个 /I UGOPEN 即可；
+- 链接库分工：
+    libufun.lib                  UF（Open C）
+    libnxopencpp.lib             NXOpen 核心（Session/Part/Builder）
+    libnxopencpp_annotations.lib 尺寸/注释（DimensionCollection 等）
+    libnxopencpp_drawings.lib    图纸（DrawingSheets/成员视图）
+- 已用上述命令在本机编译+链接验证通过（仅剩无害的 C4819/C4275 警告）。
+- 若不想用 NXOpen 部分（缺头文件时），源码会用 __has_include 自动探测并
+  退化为纯 UF 实现，此时只需链接 libufun.lib。
+
+三、在 NX12 中运行
+------------------
+1. 打开（或新建）一个部件，建议带一条水平直线/边（没有也可以，
+   程序会自动创建一条 80mm 的演示水平直线）；
+2. 建议先进入制图应用并新建一张图纸页（程序会检查图纸是否存在）；
+3. 菜单：文件 → 执行 → NX Open DLL…，选择编译出的
+   horizontal_dimension_demo.dll；
+4. 打开 信息 → 列出窗口（ListingWindow）查看逐步中文日志。
+
+四、关键版本差异提示（重要）
+----------------------------
+1. 网上不少教程写 LinearDimensionBuilder 有
+   SetDimensionPlacement(PlacementType::kHorizontal)，NX12 头文件中并不存在。
+   NX12 中尺寸类型（水平/垂直/平行…）由两个关联对象的几何关系自动推断：
+   两关联位置 Y 坐标相同即为水平尺寸；示例用一条水平直线两端点作关联。
+2. NXObjectManager::Get(tag) 在 NX12 返回 TaggedObject*，
+   需 dynamic_cast 为 NXObject*（部分更新版直接返回 NXObject*）。
+3. NX12 没有 UF_DRAW_enter_drawing_mode 之类的“进入制图”UF 函数；
+   图纸页遍历用 Part→DrawingSheets()，成员视图用
+   DrawingSheet::GetDraftingViews()。
+4. ufusr 官方签名为 void ufusr(char *param, int *retcod, int param_len)；
+   卸载/清理入口为 ufusr_ask_unload / ufusr_cleanup
+  （早期 UF 命名 ufsta / unufusr 已过时）。
+5. UF_get_fail_message 缓冲区固定 char[133]，NX12 无
+   UF_MAX_MESSAGE_LENGTH 常量。

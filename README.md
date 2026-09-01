@@ -10,7 +10,7 @@ Siemens NX12 (UG) 二次开发 C++ 工具集，基于 NXOpen C++ API，用于工
 
 | 子菜单 | 工具 | DLL |
 |--------|------|-----|
-| 制图向导Step1-7 | 1.新建图纸与视图 / 2.图纸参数设置 / 3.坐标标注 / 4.线性标注 / 5.中心线 / 6.图层切换 / 7.尺寸后缀追加 | NX12_Step1~7_*.dll |
+| 制图向导Step1-9 | 1.新建图纸与视图 / 2.图纸参数设置 / 3.坐标标注 / 4.线性标注 / 5.中心线 / 6.图层切换 / 7.尺寸后缀追加 / 8.标题框填写 / 9.云线（矩形/圆形修订云线） | NX12_Step1~9_*.dll（Step8 为 titleblock_fill.dll） |
 | 专项工具 | 打标图坐标创建 / 爆炸图自动布局 / 爆炸参数提取 / 球标标注 | dbt_step1.dll / explosion_step1.dll / explosion_step2.dll / balloon_step1.dll |
 | 标题栏填写 | 填日期 / 填零件号 / 全部填写 | titleblock_fill.dll（ufsta 注册 TITLEFILL_APP__* 动作） |
 
@@ -30,7 +30,7 @@ Siemens NX12 (UG) 二次开发 C++ 工具集，基于 NXOpen C++ API，用于工
 
 | 目录 | 功能 |
 |------|------|
-| NX12_NXOpenCPP_Wizard1/ | 多步骤制图向导（多模块）：新建图纸与视图、图纸参数设置、坐标/线性尺寸标注、中心线、图层切换、后缀追加、标题栏填写（MenuBar 注册） |
+| NX12_NXOpenCPP_Wizard1/ | 多步骤制图向导（多模块）：新建图纸与视图、图纸参数设置、坐标/线性尺寸标注、中心线、图层切换、后缀追加、标题栏填写（MenuBar 注册）、云线绘制（草图驱动，波浪直径对话框可调） |
 | NX12_NXOpenCPP_打标图/ | 打标图坐标创建（逐选圆弧 + 实时反馈） |
 | NX12_NXOpenCPP_爆炸参数/ | 从装配爆炸图提取已爆炸组件的显示名与 dx/dy/dz 偏移参数 |
 | NX12_NXOpenCPP_爆炸图/ | 装配爆炸图自动布局（原点可选、按组件宽度打包、距离在线编辑） |
@@ -49,6 +49,8 @@ NX12_MultiModule.sln
 ├── Step5_Centerlines        中心线（视图相关几何拾取）
 ├── Step6_LayerSwitch        图层切换
 ├── Step7_AppendSuffix       图纸编号后缀追加
+├── Step8_TitleBlockFill     标题框日期/零件编号填写
+├── Step9_CloudLines         草图驱动矩形/圆形云线（修订云线，直径可调）绘制
 └── Shared/NX12_CommonUtils  公共工具库（tag 遍历 / 几何查询 / 图层规范）
 ```
 
@@ -74,12 +76,15 @@ NX12_MultiModule.sln
 ## 目录说明
 
 - nx_app/startup/twp_toolbox.men：唯一菜单注册文件（GBK/936 编码、无 BOM、CRLF，NX12 兼容）。
-- nx_app/application/：12 个 DLL + explosion_params.txt + 2 个占位 .men。
+- nx_app/application/：13 个 DLL + explosion_params.txt + 2 个占位 .men（Step9 云线 DLL 构建部署后计入）。
 - 挂载点：NX12 的 UGII\menus\custom_dirs.dat 与 ug_custom_dirs.dat 末尾均含 E:\UG\nx_app。
 - 编译产物（`.dll` / `.pdb` / `.obj` 等）已通过 `.gitignore` 排除，仅保留源码与工程文件
 
 ## 版本
 
+- **v1.3.0**（2026-09-01）Step9 v3：云线参数对话框（波浪直径可调，控制云线疏密）；详见 CHANGELOG.md
+- **v1.2.0**（2026-09-01）Step9 v2 草图驱动重构：自动识别图纸草图矩形/圆形并转云线，无草图回退默认参数；详见 CHANGELOG.md
+- **v1.1.0**（2026-08-22）Step9 云线：制图模块矩形/圆形修订云线自动绘制（封闭周期样条拟合半圆弧波浪，幂等重画）；详见 CHANGELOG.md
 - **v1.0.2**（2026-08-22）注册层安全回退：移除启动阶段 DLL 自动加载，标题栏动作改为点击时注册
 - **v1.0.1**（2026-08-22）Step8 标题框填写 v3 全诊断修复版：标签匹配增强、降级路线重写
 - **v1.0.0**（2026-08-22）twp工具箱统一注册：12 个工具一键入口 + 构建部署 + 文档
