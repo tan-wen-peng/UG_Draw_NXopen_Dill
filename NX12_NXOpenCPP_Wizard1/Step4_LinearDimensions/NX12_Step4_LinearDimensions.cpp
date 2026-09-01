@@ -30,6 +30,9 @@
 #include <NXOpen/Drawings_DraftingViewCollection.hxx>
 #include <NXOpen/Drawings_BaseView.hxx>
 #include <NXOpen/DraftingManager.hxx>
+#include <NXOpen/UI.hxx>
+#include <NXOpen/Selection.hxx>
+#include <uf_ui.h>                             // UF_UI_set_cursor_view（成员视图内拾取）
 
 #include <algorithm>
 
@@ -697,6 +700,324 @@ static void phase_auto_linear_dims(NXOpen::Part* part,
 }
 
 //==============================================================================
+// 辅助：三点求圆心（制图 XY 平面；UF_CURVE_ask_arc_data 对实体边圆弧不可用时）
+//==============================================================================
+static bool circle_from_3pts(const double a[3], const double b[3], const double c[3],
+	double center[3], double& radius)
+{
+	const double ax = a[0], ay = a[1];
+	const double bx = b[0], by = b[1];
+	const double cx = c[0], cy = c[1];
+	const double d = 2.0 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+	if (fabs(d) < 1e-9) return false;
+	const double a2 = ax * ax + ay * ay;
+	const double b2 = bx * bx + by * by;
+	const double c2 = cx * cx + cy * cy;
+	center[0] = (a2 * (by - cy) + b2 * (cy - ay) + c2 * (ay - by)) / d;
+	center[1] = (a2 * (cx - bx) + b2 * (ax - cx) + c2 * (bx - ax)) / d;
+	center[2] = 0.0;
+	const double dx = ax - center[0], dy = ay - center[1];
+	radius = sqrt(dx * dx + dy * dy);
+	return radius > 1e-9;
+}
+
+//==============================================================================
+// phase_interactive_linear_dims —— 半自动线性/直径标注
+// 程序自动计算放置点并完整复刻录制宏（000R_VB.vb）的创建序列；
+// 用户只需在剖视图上逐条拾取要标注的两条边 / 一个圆弧（右键/取消结束）。
+// 自动配对版仍保留在 phase_auto_linear_dims（本函数为默认入口）。
+//==============================================================================
+static void phase_interactive_linear_dims(NXOpen::Part* part,
+	NXOpen::Drawings::DraftingView* sectionView,
+	const double borders[4],
+	double sheetW, double sheetH)
+{
+	char fmt[512];
+	NXOpen::UI* theUI = CommonUtils::get_ui();
+	NXOpen::Session* sess = CommonUtils::get_session();
+	CommonUtils::silent_update(sess);
+	sectionView->Update();
+
+	// 允许拾取成员视图内的投影边/制图曲线（原 6b 交互框架同款）
+	int oldCursorView = 1;
+	UF_UI_ask_cursor_view(&oldCursorView);
+	UF_UI_set_cursor_view(0);
+
+	// 选择过滤器：直线/圆/圆锥/样条 + 实体边
+	std::vector<NXOpen::Selection::MaskTriple> masks;
+	masks.push_back(NXOpen::Selection::MaskTriple(UF_line_type, 0, 0));
+	masks.push_back(NXOpen::Selection::MaskTriple(UF_circle_type, 0, 0));
+	masks.push_back(NXOpen::Selection::MaskTriple(UF_conic_type, 0, 0));
+	masks.push_back(NXOpen::Selection::MaskTriple(UF_spline_type, 0, 0));
+	masks.push_back(NXOpen::Selection::MaskTriple(UF_solid_type, UF_solid_edge_subtype, UF_UI_SEL_FEATURE_ANY_EDGE));
+
+	int linearCount = 0;
+
+	// ---- 线性标注：拾取两条边 -> 自动放置 ----
+	for (;;)
+	{
+		NXOpen::TaggedObject* t1 = NULL;
+		NXOpen::TaggedObject* t2 = NULL;
+		NXOpen::Point3d cur1(0.0, 0.0, 0.0), cur2(0.0, 0.0, 0.0);
+
+		NXOpen::Selection::Response r1 = theUI->SelectionManager()->SelectTaggedObject(
+			"拾取第一条边（右键/取消结束线性标注）", "半自动线性-边1",
+			NXOpen::Selection::SelectionScopeWorkPart,
+			NXOpen::Selection::SelectionActionClearAndEnableSpecific,
+			false, true, masks, &t1, &cur1);
+		if (r1 != NXOpen::Selection::ResponseObjectSelected || !t1) break;
+
+		NXOpen::Selection::Response r2 = theUI->SelectionManager()->SelectTaggedObject(
+			"拾取第二条边（右键/取消跳过本条）", "半自动线性-边2",
+			NXOpen::Selection::SelectionScopeWorkPart,
+			NXOpen::Selection::SelectionActionClearAndEnableSpecific,
+			false, true, masks, &t2, &cur2);
+		if (r2 != NXOpen::Selection::ResponseObjectSelected || !t2) continue;
+
+		NXOpen::DisplayableObject* disp1 = dynamic_cast<NXOpen::DisplayableObject*>(
+			NXOpen::NXObjectManager::Get(t1->Tag()));
+		NXOpen::DisplayableObject* disp2 = dynamic_cast<NXOpen::DisplayableObject*>(
+			NXOpen::NXObjectManager::Get(t2->Tag()));
+		if (!disp1 || !disp2)
+		{
+			CommonUtils::print_msg("  警告: 拾取对象不是可显示对象，跳过本条");
+			continue;
+		}
+
+		// ---- 自动放置点：两条边的模型端点 -> 图纸坐标 -> calc_linear_placement ----
+		double s1[2] = { 0.0, 0.0 }, e1[2] = { 0.0, 0.0 };
+		double s2[2] = { 0.0, 0.0 }, e2[2] = { 0.0, 0.0 };
+		double a0[3], a1[3], b0[3], b1[3];
+		double tg[3], pn[3], bn[3], torsion = 0.0, roc = 0.0;
+		bool geoOk =
+			UF_MODL_ask_curve_props(t1->Tag(), 0.0, a0, tg, pn, bn, &torsion, &roc) == 0 &&
+			UF_MODL_ask_curve_props(t1->Tag(), 1.0, a1, tg, pn, bn, &torsion, &roc) == 0 &&
+			UF_MODL_ask_curve_props(t2->Tag(), 0.0, b0, tg, pn, bn, &torsion, &roc) == 0 &&
+			UF_MODL_ask_curve_props(t2->Tag(), 1.0, b1, tg, pn, bn, &torsion, &roc) == 0;
+		NXOpen::Point3d placePt(cur1.X, cur1.Y, 0.0);
+		if (geoOk)
+		{
+			geoOk =
+				CommonUtils::map_model_to_drawing(sectionView->Tag(), a0, s1) &&
+				CommonUtils::map_model_to_drawing(sectionView->Tag(), a1, e1) &&
+				CommonUtils::map_model_to_drawing(sectionView->Tag(), b0, s2) &&
+				CommonUtils::map_model_to_drawing(sectionView->Tag(), b1, e2);
+		}
+		if (geoOk)
+		{
+			placePt = CommonUtils::calc_linear_placement(s1, e1, s2, e2, borders, 12.0);
+		}
+		else
+		{
+			// 端点不可得：退化为两条拾取点的中点上侧
+			double d1[2] = { 0.0, 0.0 }, d2[2] = { 0.0, 0.0 };
+			const double m1[3] = { cur1.X, cur1.Y, cur1.Z };
+			const double m2[3] = { cur2.X, cur2.Y, cur2.Z };
+			if (CommonUtils::map_model_to_drawing(sectionView->Tag(), m1, d1) &&
+				CommonUtils::map_model_to_drawing(sectionView->Tag(), m2, d2))
+				placePt = NXOpen::Point3d((d1[0] + d2[0]) / 2.0, (d1[1] + d2[1]) / 2.0 + 12.0, 0.0);
+		}
+		clamp_to_sheet(placePt, sheetW, sheetH);
+
+		sprintf_s(fmt, sizeof(fmt),
+			"[Step4] 半自动线性: 边1 tag=%llu 边2 tag=%llu -> 放置点(%.2f, %.2f)",
+			(unsigned long long)t1->Tag(), (unsigned long long)t2->Tag(),
+			placePt.X, placePt.Y);
+		CommonUtils::print_msg(fmt);
+
+		bool created = false;
+
+		// ---- 主路径：LinearDimensionBuilder（拾取点即关联点，录制宏同款） ----
+		NXOpen::Annotations::LinearDimensionBuilder* dimBuilder = NULL;
+		try
+		{
+			dimBuilder = part->Dimensions()->CreateLinearDimensionBuilder(NULL);
+			dimBuilder->FirstAssociativity()->SetValue(disp1, sectionView, cur1);
+			dimBuilder->SecondAssociativity()->SetValue(disp2, sectionView, cur2);
+			dimBuilder->Origin()->SetAnchor(NXOpen::Annotations::OriginBuilder::AlignmentPositionMidCenter);
+			dimBuilder->Origin()->SetInferRelativeToGeometry(false);
+			dimBuilder->Origin()->AnnotationView()->SetValue(sectionView);
+			{
+				NXOpen::Annotations::Annotation::AssociativeOriginData ao;
+				ao.OriginType = NXOpen::Annotations::AssociativeOriginTypeDrag;
+				dimBuilder->Origin()->SetAssociativeOrigin(ao);
+			}
+			dimBuilder->Origin()->SetOriginPoint(placePt);
+			dimBuilder->Commit();
+			dimBuilder->Destroy();
+			dimBuilder = NULL;
+			created = true;
+		}
+		catch (const NXOpen::NXException& e)
+		{
+			if (dimBuilder) { dimBuilder->Destroy(); dimBuilder = NULL; }
+			CommonUtils::print_msg(string("  警告: 半自动线性失败，回退 RapidDimensionBuilder: ") + e.Message());
+		}
+		catch (...)
+		{
+			if (dimBuilder) { dimBuilder->Destroy(); dimBuilder = NULL; }
+			CommonUtils::print_msg("  警告: 半自动线性失败（未知异常），回退 RapidDimensionBuilder");
+		}
+
+		// ---- 回退：RapidDimensionBuilder ----
+		if (!created)
+		{
+			NXOpen::Annotations::RapidDimensionBuilder* rapidBuilder = NULL;
+			try
+			{
+				rapidBuilder = part->Dimensions()->CreateRapidDimensionBuilder(NULL);
+				rapidBuilder->FirstAssociativity()->SetValue(disp1, sectionView, cur1);
+				rapidBuilder->SecondAssociativity()->SetValue(disp2, sectionView, cur2);
+				rapidBuilder->Origin()->SetAnchor(NXOpen::Annotations::OriginBuilder::AlignmentPositionMidCenter);
+				rapidBuilder->Origin()->SetInferRelativeToGeometry(false);
+				rapidBuilder->Origin()->AnnotationView()->SetValue(sectionView);
+				{
+					NXOpen::Annotations::Annotation::AssociativeOriginData ao;
+					ao.OriginType = NXOpen::Annotations::AssociativeOriginTypeDrag;
+					rapidBuilder->Origin()->SetAssociativeOrigin(ao);
+				}
+				rapidBuilder->Origin()->SetOriginPoint(placePt);
+				rapidBuilder->Commit();
+				rapidBuilder->Destroy();
+				rapidBuilder = NULL;
+				created = true;
+			}
+			catch (const NXOpen::NXException& e)
+			{
+				if (rapidBuilder) { rapidBuilder->Destroy(); rapidBuilder = NULL; }
+				CommonUtils::print_msg(string("  警告: 半自动线性创建失败（含回退）: ") + e.Message());
+			}
+			catch (...)
+			{
+				if (rapidBuilder) { rapidBuilder->Destroy(); rapidBuilder = NULL; }
+				CommonUtils::print_msg("  警告: 半自动线性创建失败（含回退，未知异常）");
+			}
+		}
+
+		if (created)
+		{
+			++linearCount;
+			sprintf_s(fmt, sizeof(fmt), "[Step4] 已创建半自动线性标注 第 %d 条", linearCount);
+			CommonUtils::print_msg(fmt);
+		}
+	}
+
+	// ---- 直径标注：拾取圆弧 -> 自动放置 ----
+	int radialCount = 0;
+	for (;;)
+	{
+		NXOpen::TaggedObject* t = NULL;
+		NXOpen::Point3d cur(0.0, 0.0, 0.0);
+		NXOpen::Selection::Response r = theUI->SelectionManager()->SelectTaggedObject(
+			"拾取圆弧/圆（右键/取消结束直径标注）", "半自动直径标注",
+			NXOpen::Selection::SelectionScopeWorkPart,
+			NXOpen::Selection::SelectionActionClearAndEnableSpecific,
+			false, true, masks, &t, &cur);
+		if (r != NXOpen::Selection::ResponseObjectSelected || !t) break;
+		NXOpen::DisplayableObject* disp = dynamic_cast<NXOpen::DisplayableObject*>(
+			NXOpen::NXObjectManager::Get(t->Tag()));
+		if (!disp) continue;
+
+		// 圆心/半径：UF_CURVE_ask_arc_data 优先，失败用三点法
+		double center[3] = { 0.0, 0.0, 0.0 };
+		double radius = 0.0;
+		bool arcOk = false;
+		{
+			int type = 0, subtype = 0;
+			UF_OBJ_ask_type_and_subtype(t->Tag(), &type, &subtype);
+			if (type == UF_circle_type)
+			{
+				UF_CURVE_arc_t ad;
+				if (UF_CURVE_ask_arc_data(t->Tag(), &ad) == 0)
+				{
+					center[0] = ad.arc_center[0];
+					center[1] = ad.arc_center[1];
+					center[2] = ad.arc_center[2];
+					radius = ad.radius;
+					arcOk = (radius > 1e-6);
+				}
+			}
+			if (!arcOk)
+			{
+				double pts[3][3];
+				bool ok3 = true;
+				double tg2[3], pn2[3], bn2[3], torsion2 = 0.0, roc2 = 0.0;
+				for (int k = 0; k < 3; ++k)
+				{
+					if (UF_MODL_ask_curve_props(t->Tag(), k * 0.3333333333333333, pts[k], tg2, pn2, bn2, &torsion2, &roc2) != 0)
+						ok3 = false;
+				}
+				if (ok3) arcOk = circle_from_3pts(pts[0], pts[1], pts[2], center, radius);
+			}
+		}
+		if (!arcOk)
+		{
+			CommonUtils::print_msg("  警告: 无法从拾取对象求圆心/半径，跳过该直径标注");
+			continue;
+		}
+
+		// 自动放置点：图纸圆心 + 沿拾取方向外移（图纸半径 + 12）
+		double cd[2] = { 0.0, 0.0 }, pd[2] = { 0.0, 0.0 };
+		const double mp[3] = { cur.X, cur.Y, cur.Z };
+		if (!CommonUtils::map_model_to_drawing(sectionView->Tag(), center, cd) ||
+			!CommonUtils::map_model_to_drawing(sectionView->Tag(), mp, pd))
+		{
+			CommonUtils::print_msg("  警告: 圆弧坐标映射失败，跳过该直径标注");
+			continue;
+		}
+		const double drawR = radius * sectionView->Scale();
+		double dx = pd[0] - cd[0], dy = pd[1] - cd[1];
+		double len = sqrt(dx * dx + dy * dy);
+		NXOpen::Point3d placePt;
+		if (len < 1e-6)
+			placePt = NXOpen::Point3d(cd[0] + drawR + 12.0, cd[1] + drawR + 12.0, 0.0);
+		else
+			placePt = NXOpen::Point3d(cd[0] + dx / len * (drawR + 12.0),
+				cd[1] + dy / len * (drawR + 12.0), 0.0);
+		clamp_to_sheet(placePt, sheetW, sheetH);
+
+		NXOpen::Annotations::RadialDimensionBuilder* dimBuilder = NULL;
+		try
+		{
+			dimBuilder = part->Dimensions()->CreateRadialDimensionBuilder(NULL);
+			dimBuilder->FirstAssociativity()->SetValue(disp, sectionView, cur);
+			dimBuilder->SetHoleStyle(true);
+			dimBuilder->Origin()->SetAnchor(NXOpen::Annotations::OriginBuilder::AlignmentPositionMidCenter);
+			dimBuilder->Origin()->SetInferRelativeToGeometry(false);
+			dimBuilder->Origin()->AnnotationView()->SetValue(sectionView);
+			{
+				NXOpen::Annotations::Annotation::AssociativeOriginData ao;
+				ao.OriginType = NXOpen::Annotations::AssociativeOriginTypeDrag;
+				dimBuilder->Origin()->SetAssociativeOrigin(ao);
+			}
+			dimBuilder->Origin()->SetOriginPoint(placePt);
+			dimBuilder->Commit();
+			dimBuilder->Destroy();
+			dimBuilder = NULL;
+			++radialCount;
+			sprintf_s(fmt, sizeof(fmt), "[Step4] 已创建半自动直径标注 第 %d 条", radialCount);
+			CommonUtils::print_msg(fmt);
+		}
+		catch (const NXOpen::NXException& e)
+		{
+			if (dimBuilder) { dimBuilder->Destroy(); dimBuilder = NULL; }
+			CommonUtils::print_msg(string("  警告: 半自动直径标注创建失败: ") + e.Message());
+		}
+		catch (...)
+		{
+			if (dimBuilder) { dimBuilder->Destroy(); dimBuilder = NULL; }
+			CommonUtils::print_msg("  警告: 半自动直径标注创建失败（未知异常）");
+		}
+	}
+
+	// 恢复光标视图
+	UF_UI_set_cursor_view(oldCursorView);
+
+	sprintf_s(fmt, sizeof(fmt),
+		"[Step4] 半自动标注结束: 线性 %d 条 / 直径 %d 条", linearCount, radialCount);
+	CommonUtils::print_msg(fmt);
+}
+//==============================================================================
 // do_it —— Step4 入口逻辑
 //==============================================================================
 static void do_it()
@@ -791,8 +1112,9 @@ static void do_it()
 				"[Step4] 警告: 视图边界超出图纸范围（Step1 放置问题），标注放置点将钳制到图纸内");
 		}
 
-		// ===== 执行自动标注 =====
-		phase_auto_linear_dims(part, sectionView, borders, sheetLen, sheetHgt);
+		// ===== 执行半自动标注（交互拾取边/圆弧，自动放置；
+		// 自动配对版保留在 phase_auto_linear_dims，可改回） =====
+		phase_interactive_linear_dims(part, sectionView, borders, sheetLen, sheetHgt);
 
 		// ===== 静默更新 =====
 		CommonUtils::silent_update(session);
