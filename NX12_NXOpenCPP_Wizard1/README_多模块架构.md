@@ -2,7 +2,7 @@
 
 ## 1. 概述
 
-本项目将原单一 `NX12_NXOpenCPP_Wizard1.cpp` 拆分为 **6 个独立 DLL** + **共享基础设施**，实现功能模块化：
+本项目将原单一 `NX12_NXOpenCPP_Wizard1.cpp` 拆分为 **9 个独立 DLL** + **共享基础设施**，实现功能模块化：
 
 - 每个 DLL 可独立通过 **Ctrl+U**（文件 → 执行 → NX Open）加载执行
 - 各模块通过当前图纸 / 视图对象在运行时传递上下文，彼此解耦
@@ -32,10 +32,16 @@ e:\UG\NX12_NXOpenCPP_Wizard1\
 │   └── NX12_Step5_Centerlines.cpp
 ├── Step6_LayerSwitch\                # DLL 6 — 图层切换
 │   └── NX12_Step6_LayerSwitch.cpp
+├── Step7_AppendSuffix\               # DLL 7 — 尺寸后缀标号
+│   └── NX12_Step7_AppendSuffix.cpp
+├── Step8_TitleBlockFill\              # DLL 8 — 标题框日期/零件编号填写
+│   └── NX12_Step8_TitleBlockFill.cpp
+├── Step9_CloudLines\                  # DLL 9 — 云线（矩形/圆形修订云线）
+│   └── NX12_Step9_CloudLines.cpp
 ├── NX12_NXOpenCPP_Wizard1\           # 原始项目（基线，不参与构建）
 ├── NX12_MultiModule.sln              # 主解决方案
 ├── build_all.bat                     # 一键构建脚本
-└── bin\Release\                      # 统一输出目录（6 个 DLL + 1 个 .lib）
+└── bin\Release\                      # 统一输出目录（9 个 DLL + 1 个 .lib）
 ```
 
 ---
@@ -50,8 +56,13 @@ e:\UG\NX12_NXOpenCPP_Wizard1\
 | 3 | `NX12_Step3_OrdinateDimensions.dll` | 自动枚举剖视轮廓端点，成组水平/垂直坐标标注 | Step1 + Step5（需剖视图 + 中心线） |
 | 4 | `NX12_Step4_LinearDimensions.dll` | 交互拾取边生成线性/直径标注 | Step1（需有剖视图） |
 | 6 | `NX12_Step6_LayerSwitch.dll` | 工序图层切换对话框 | 无（独立运行） |
+| 7 | `NX12_Step7_AppendSuffix.dll` | 剖视图尺寸按 D/L 分组追加 (D1)/(L1) 后缀 | Step1（需有剖视图） |
+| 8 | `NX12_Step8_TitleBlockFill.dll` | 标题框“日期”/“零件编号”自动填写 | Step1（需有图纸/标题框） |
+| 9 | `NX12_Step9_CloudLines.dll` | 扫描当前图纸草图自动生成矩形/圆形云线（修订云线）；无草图回退默认配置 | Step1（需有打开图纸 + 制图草图） |
 
-**推荐执行顺序：** Step1 → Step5 → Step3 → Step4 → Step2 → Step6
+**推荐执行顺序：** Step1 → Step5 → Step3 → Step4 → Step2 → Step6 → Step7 → Step8 → Step9
+
+> Step7/Step8/Step9 均在 Step1 之后任意时机独立执行（Step9 要求目标图纸处于打开/显示状态）。
 
 > **说明：** Step5 需在 Step3 之前运行，因为 Step3 的坐标标注以 Step5 创建的中心线作为基准。Step2 和 Step6 可在任意时机独立执行。
 
@@ -81,7 +92,7 @@ e:\UG\NX12_NXOpenCPP_Wizard1\
 
 构建产物输出到 `bin\Release\` 目录：
 
-- 6 个 DLL（`NX12_Step1_SheetAndViews.dll` ~ `NX12_Step6_LayerSwitch.dll`）
+- 9 个 DLL（`NX12_Step1_SheetAndViews.dll` ~ `NX12_Step9_CloudLines.dll`）
 - 1 个静态库（`NX12_CommonUtils.lib`）
 
 ---
@@ -157,4 +168,6 @@ MSBuild 共享属性文件，统一所有项目的编译链接配置：
 2. **Step1 幂等保护**：同名图纸复用（不会重复创建）、已有视图跳过，可安全重复执行
 3. **即时卸载**：每个 DLL 加载后立即卸载（`LibraryUnloadOptionImmediately`），不驻留内存
 4. **windows.h 防护**：每个需要对话框的 DLL 保留 `WIN32_LEAN_AND_MEAN`、`NOMINMAX`、`#undef CreateDialog`，避免与 NXOpen 头文件冲突
+5. **Step9 云线说明（v3 草图驱动 + 直径对话框）**：NX12 制图模块无原生“云线”命令，Step9 用封闭周期样条（`UF_CURVE_create_spline_thru_pts`，degree=3、periodicity=1）拟合波浪半圆弧；优先扫描当前图纸上的制图草图（`Sketch::IsDraftingSketch` + 图纸视图匹配），自动识别 4 直线闭合矩形与完整圆/大圆弧并继承其位置尺寸生成云线；无可用草图时回退 `kFallback*` 默认配置（v1 行为）；幂等标记：草图 `STEP9_SKETCH`（不重复处理）、云线 `STEP9_CLOUD`（值 `DEFAULT` / `SKETCH:<tag>`，重画同源先删旧线，v1 整数属性旧云线自动迁移清理）；波浪直径（云线疏密）运行时由“云线参数”对话框输入（默认 8.0 mm，配置常量 `kWaveChordDefault` 为默认值，取消对话框则本次不画），其余参数与容差在 `Step9_CloudLines\NX12_Step9_CloudLines.cpp` 顶部配置区调整
+6. **Step9 排障**：若信息窗口显示“已创建”但图纸上看不到云线（个别环境把曲线建到了模型空间），先核对云线图层（默认 1）是否被隐藏、识别出的坐标是否落在图幅内；草图已打 `STEP9_SKETCH` 标记后如需随草图修改重画，把 `kReprocessMarkedSketches` 改为 true 重跑（或删除草图上的该属性）
 5. **配置集中管理**：换零件或换模板时，只需修改 `NX12_CommonConfig.h` 中的配置值

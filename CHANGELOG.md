@@ -2,6 +2,78 @@
 
 本文件记录 E:\UG（UG_Draw_NXopen_Dill）的发布历史。版本规则：vMAJOR.MINOR.PATCH。
 
+## [1.3.0] - 2026-09-01 —— Step9 v3 云线参数对话框（波浪直径可调）
+
+### 变更（Step9_CloudLines\NX12_Step9_CloudLines.cpp）
+- 新增运行时“云线参数”对话框（Win32 内存 DLGTEMPLATE + DialogBoxIndirectW，与 Step6 同一
+  对话框范式，无需资源文件）：输入“波浪直径（每波弦长，mm）”，默认 8.0，数值越小
+  云线越密、越大越疏，直接控制半圆弧波浪大小；确定后本次运行按输入值生成，
+  取消则本次不画云线（旧云线保留）。
+- 配置常量 kWaveChord 更名为 kWaveChordDefault（仅作对话框默认值），生成逻辑改为
+  运行时变量 waveChord 传递；草图识别与回退默认模式均生效。
+- 编译修复随本版合入：补 #include <uf_object_types.h>（UF_line_type 等类型常量）、
+  #include <NXOpen/DraftingManager.hxx>（Part::Drafting 完整类型）、
+  自定义 PI 常量更名 kPI（避免与 uf_defs.h 的 PI 宏冲突）。
+- Win32 防护（WIN32_LEAN_AND_MEAN / NOMINMAX / #undef CreateDialog）与 windows.h
+  前置包含，与 Step6/Step8 同范式。
+
+### 部署
+- 与 1.1.0/1.2.0 相同：构建 NX12_MultiModule.sln（Release x64）后部署 DLL；
+  twp_toolbox.men 菜单注册仍为 GBK 手工追加，未变。
+
+## [1.2.0] - 2026-09-01 —— Step9 v2 草图驱动重构
+
+### 变更（Step9_CloudLines 目录下 NX12_Step9_CloudLines.cpp 整文件重写）
+- 新增草图驱动模式：扫描当前工作图纸上的制图草图（Part::Sketches() 遍历 +
+  Sketch::IsDraftingSketch() 过滤 + 图纸视图 tag 匹配），GetAllGeometry() 枚举
+  草图曲线并分类（直线/完整圆/圆弧/样条/圆锥/其它）。
+- 矩形识别：4 条直线段闭合链（对边等长平行、邻边垂直；端点容差 0.01mm、
+  角度容差 1 度、边长容差 5%），提取中心/宽/高/倾角（支持非水平矩形，云线按倾角旋转生成）。
+- 圆形识别：完整圆（±2 度）或扫略角 ≥270 度的圆弧，提取圆心/半径；
+  圆弧中心经矩阵换算到绝对坐标（单位阵直接使用）。
+- 参数继承：云线位置/尺寸直接取自识别结果，替换 v1 硬编码常量；
+  无可识别草图时回退 kFallback* 默认配置（等同 v1 行为，向后兼容）。
+- 幂等升级：草图打 STEP9_SKETCH 属性不再重复处理；云线 STEP9_CLOUD 改为
+  字符串属性（DEFAULT / SKETCH:<tag>），重画同源先删旧线；v1 整数属性旧云线自动迁移清理。
+- 模块化：草图枚举/几何分类/矩形识别/圆形识别/云线生成/幂等管理拆分独立函数；
+  逐草图 try/catch 隔离异常，识别失败优雅降级不中断流程。
+- 代码规范：C++11/14（auto、范围 for、nullptr、constexpr），函数级 Doxygen 中文注释，
+  文件 UTF-8 带 BOM；诊断日志输出草图枚举统计、每草图几何统计、识别形状参数与生成结果。
+
+### 部署
+- DLL 名/工程/解决方案接线不变（NX12_Step9_CloudLines.dll）；
+  菜单注册（GBK 手工追加）与构建部署步骤沿用 1.1.0 条目。
+
+## [1.1.0] - 2026-08-22 —— Step9 云线（矩形/圆形修订云线）
+
+### 新增
+- **Step9_CloudLines 模块**（NX12_Step9_CloudLines.dll，DLL 9/9）：在当前工作图纸上自动绘制云线：
+  1. **矩形云线**：沿矩形边界（宽×高）交替外凸/内凹半圆弧波浪；
+  2. **圆形云线**：沿圆周交替外凸/内凹半圆弧波浪。
+- 实现说明：NX12 制图模块**无原生“云线”命令**（已核实 NX 12.0 安装目录菜单/资源无 Cloud 命令，西门子社区亦确认需自行绘制）；本模块用封闭周期样条
+  （`UF_CURVE_create_spline_thru_pts`，degree=3、periodicity=1）拟合波浪半圆弧，效果等同 AutoCAD REVCLOUD 矩形/圆形样式，且为**单条封闭曲线**。
+- 幂等保护：新云线打 `STEP9_CLOUD` 用户属性，重跑先删旧云线再重画，不会越画越多。
+- 参数集中：模式（矩形/圆形/都画）、中心/宽高/半径、波幅、每波采样、图层、颜色均在
+  `NX12_NXOpenCPP_Wizard1\Step9_CloudLines\NX12_Step9_CloudLines.cpp` 顶部配置区调整。
+
+### 工程接线
+- 新增 `Step9_CloudLines\NX12_Step9_CloudLines.vcxproj`（TargetName=NX12_Step9_CloudLines）与 .filters；
+- `NX12_MultiModule.sln` 已加入 Step9 项目（含 CommonUtils 依赖与 Debug/Release x64 配置），`build_all.bat` 无需改动（整体构建解决方案）；
+- README_多模块架构.md / README.md / nx_app 部署说明已同步更新。
+
+### 部署说明（菜单注册待手工完成）
+- `twp_toolbox.men` 与 `build_and_deploy.bat` 为 **GBK/ANSI（936）编码**，本次未直接改写（避免破坏编码）；
+  按 `nx_app\README_twp工具箱部署说明.md` 第五节“未来新增工具（三步法）”手工追加按钮并重新构建部署即可：
+  1. 构建 `NX12_MultiModule.sln`（Release x64），将 `bin\Release\NX12_Step9_CloudLines.dll` 复制到 `E:\UG\nx_app\application\`；
+  2. 用记事本（另存为 ANSI/GBK）在 `startup\twp_toolbox.men` 的“制图向导”菜单块追加：
+```
+BUTTON TWP_WIZ_STEP9
+LABEL 9.云线
+ACTIONS NX12_Step9_CloudLines.dll
+```
+  3. 重启 NX 验证。
+- 未部署前可通过 **Ctrl+U → 文件 → 执行 → NX Open** 直接加载 `bin\Release\NX12_Step9_CloudLines.dll` 使用。
+
 ## [1.0.2] - 2026-08-22 —— 注册层安全回退（启动零代码执行）
 
 - 移除 startup 阶段的 MODIFY UG_APP_GATEWAY + LIBRARIES titleblock_fill 自动加载
