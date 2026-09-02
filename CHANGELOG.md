@@ -2,6 +2,33 @@
 
 本文件记录 E:\UG（UG_Draw_NXopen_Dill）的发布历史。版本规则：vMAJOR.MINOR.PATCH。
 
+## [1.4.2] - 2026-09-01 —— Step9 v6 编译兼容修复
+
+### 修复
+- C2440/E0144：NXObjectManager::Get 在 NX12 返回 TaggedObject*，删除参考几何前先
+  dynamic_cast 到 NXObject* 再交给 Sketch::DeleteObjects。
+- E1097 no_init_all：在包含 windows.h 前预定义 DECLSPEC_NOINITALL 置空，屏蔽
+  SDK 10.0.19041 winnt.h 里旧工具链/IntelliSense 不识别的 no_init_all 属性。
+- C4474/C4477/C4313：两处日志改为 std::to_string 拼接后经 const char* 输出，
+  规避 VS2017 sprintf_s 格式检查器对“格式符紧跟中文字符”的误报；
+  其余“%s云线/%s几何/%.2f°”等格式串统一在格式符后补 ASCII 空格或换词。
+
+### 部署
+- 同前：构建 NX12_MultiModule.sln（Release x64）后部署 DLL，菜单注册不变。
+
+## [1.4.1] - 2026-09-01 —— Step9 v5 修复：参考几何删除失败与图纸名日志乱码
+
+### 修复
+- 参考几何删除失败（日志“删除参考几何失败 tag=84636 等”）：草图曲线不能直接
+  UF_OBJ_delete_object（NX 返回错误），改为草图专属 Sketch::DeleteObjects（自动
+  清理相关约束），逐条统计失败并保留；调用点传入草图指针。
+- 图纸名日志乱码（“褰撳墠宸ヤ綔鍥剧焊 SHT1”）：该行原走 print_msg(std::string)
+  重载，经 NXString 本地编码转换导致中文乱码；改为 char 缓冲 sprintf_s 后走
+  print_msg(const char*) 重载，与其余日志一致。
+
+### 部署
+- 同前：构建 NX12_MultiModule.sln（Release x64）后部署 DLL，菜单注册不变。
+
 ## [1.4.0] - 2026-09-01 —— Step9 v4 生成云线后自动删除参考草图几何
 
 ### 变更（Step9_CloudLines\NX12_Step9_CloudLines.cpp）

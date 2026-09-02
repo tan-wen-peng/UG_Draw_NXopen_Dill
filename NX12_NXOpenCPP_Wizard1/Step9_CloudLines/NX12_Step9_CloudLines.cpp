@@ -2,7 +2,19 @@
 // NX12 Step9：云线（修订云线）自动绘制（DLL 9/9）
 //------------------------------------------------------------------------------
 // 版本历史：
-//   v4 (2026-09-01) 参考几何自动删除（本文件最新）：
+//   v6 (2026-09-01) 编译兼容修复（本文件最新）：
+//     · NXObjectManager::Get 返回 TaggedObject*，删除参考几何时先 dynamic_cast 到
+//       NXObject* 再交给 Sketch::DeleteObjects（修复 C2440/E0144）；
+//     · 预定义 DECLSPEC_NOINITALL 置空，屏蔽 SDK 10.0.19041 winnt.h 的
+//       no_init_all 属性（旧工具链/IntelliSense 不认识，修复 E1097）；
+//     · 两处日志改 std::to_string 拼接输出，规避 VS2017 sprintf_s 格式检查器
+//       对“格式符紧跟中文字符”的误报（C4474/C4477/C4313）。
+//   v5 (2026-09-01) 修复草图参考几何删除：
+//     · 草图曲线不能直接 UF_OBJ_delete_object（NX 返回失败），改为草图专属
+//       Sketch::DeleteObjects（自动清理相关约束），失败逐条记录并保留；
+//     · 修复图纸名日志乱码：该行改用 char 缓冲 + const char* 重载输出
+//       （std::string 重载经 NXString 本地编码转换会导致中文乱码）。
+//   v4 (2026-09-01) 参考几何自动删除：
 //     · 云线生成成功后，自动删除作为参考的草图矩形（4 条直线）/ 圆形（圆或大圆弧）
 //       几何，草图本身保留；由配置开关 kDeleteSourceGeometry 控制（默认开启，
 //       改为 false 可保留参考几何）；
@@ -45,6 +57,11 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+// 兼容旧工具链/IntelliSense：SDK 10.0.19041 winnt.h 的 DECLSPEC_NOINITALL
+// 使用 VS2019 16.5+ 才支持的 no_init_all 属性，旧版下置空（仅损失零初始化提示）
+#ifndef DECLSPEC_NOINITALL
+#define DECLSPEC_NOINITALL
+#endif
 #include <windows.h>
 #include <stdlib.h>                            // _wtof（对话框数值解析）
 #include <wchar.h>                             // swprintf_s（对话框默认值回显）
@@ -62,6 +79,7 @@
 #include <NXOpen/Sketch.hxx>                // Sketch / GetAllGeometry / IsDraftingSketch
 #include <NXOpen/SketchCollection.hxx>      // Part::Sketches() 枚举
 #include <NXOpen/DraftingManager.hxx>          // Part::Drafting() 完整类型（EnterDraftingApplication）
+#include <NXOpen/ErrorList.hxx>                // Sketch::DeleteObjects 返回的错误列表
 #include <uf_attr.h>                        // UF_ATTR_*（STEP9_CLOUD / STEP9_SKETCH 用户属性）
 #include <uf_csys.h>                        // UF_CSYS_ask_matrix_values（圆弧中心矩阵换算）
 #include <uf_object_types.h>                // UF_line_type / UF_circle_type / UF_spline_type / UF_conic_type（草图几何分类）
@@ -642,14 +660,14 @@ static tag_t draw_one_cloud(const std::vector<CloudPt>& pts, const char* kind,
 {
     tag_t tag = NULL_TAG;
     char fmt[512];
-    sprintf_s(fmt, sizeof(fmt), "[Step9] 正在生成%s云线：采样点 %d 个，来源 %s ...",
+    sprintf_s(fmt, sizeof(fmt), "[Step9] 正在生成%s 云线：采样点 %d 个，来源 %s ...",
               kind, (int)pts.size(), sourceId.c_str());
     CommonUtils::print_msg(fmt);
     if (!create_periodic_spline(pts, &tag))
         return NULL_TAG;
     style_cloud(tag);
     set_cloud_source(tag, sourceId);
-    sprintf_s(fmt, sizeof(fmt), "[Step9] %s云线已创建 tag=%llu（图层 %d，颜色 %d，来源 %s）",
+    sprintf_s(fmt, sizeof(fmt), "[Step9] %s 云线已创建 tag=%llu（图层 %d，颜色 %d，来源 %s）",
               kind, (unsigned long long)tag, kCloudLayer, kCloudColor, sourceId.c_str());
     CommonUtils::print_msg(fmt);
     return tag;
@@ -978,7 +996,7 @@ static int recognize_sketch_shapes(NXOpen::Sketch* sk, std::vector<ShapeRec>& ou
         s.sourceTags = ri.lineTags;
         out.push_back(s);
         sprintf_s(fmt, sizeof(fmt),
-                  "[Step9 识别] 矩形：中心(%.2f, %.2f) 宽 %.2f 高 %.2f 倾角 %.2f°（4 条直线闭合）",
+                  "[Step9 识别] 矩形：中心(%.2f, %.2f) 宽 %.2f 高 %.2f 倾角 %.2f 度（4 条直线闭合）",
                   ri.cx, ri.cy, ri.width, ri.height, ri.angleDeg);
         CommonUtils::print_msg(fmt);
     }
@@ -1004,31 +1022,59 @@ static int recognize_sketch_shapes(NXOpen::Sketch* sk, std::vector<ShapeRec>& ou
 
 /**
  * @brief 云线生成成功后删除参考草图几何（矩形 4 条直线 / 圆或大圆弧曲线）。
- * 由配置开关 kDeleteSourceGeometry 控制（默认开启）；只删除该形状对应的来源
- * 曲线，草图本身保留；删除失败逐 tag 记录日志，不影响流程。
+ * 草图曲线必须通过 Sketch::DeleteObjects 删除（会同时清理相关约束），
+ * 直接 UF_OBJ_delete_object 会被 NX 拒绝；由配置开关 kDeleteSourceGeometry
+ * 控制（默认开启），草图本身保留，失败保留几何并记录日志。
+ * @param sk 来源草图
  * @param s 已生成云线的形状（携带来源曲线 tag）
  * @return 实际删除的曲线数
  */
-static int delete_shape_sources(const ShapeRec& s)
+static int delete_shape_sources(NXOpen::Sketch* sk, const ShapeRec& s)
 {
     if (!kDeleteSourceGeometry || s.sourceTags.empty()) return 0;
-    int removed = 0;
+    if (sk == nullptr)
+    {
+        CommonUtils::print_msg("  [Step9] 警告：草图指针为空，跳过参考几何删除");
+        return 0;
+    }
+    std::vector<NXOpen::NXObject*> objs;
     for (auto t : s.sourceTags)
     {
         if (t == NULL_TAG) continue;
-        if (UF_OBJ_delete_object(t) == 0)
+        NXOpen::TaggedObject* to = NXOpen::NXObjectManager::Get(t);   // NX12 返回 TaggedObject*
+        NXOpen::NXObject* o = dynamic_cast<NXOpen::NXObject*>(to);
+        if (o != nullptr) objs.push_back(o);
+    }
+    if (objs.empty()) return 0;
+
+    int errors = 0;
+    try
+    {
+        NXOpen::ErrorList* errList = sk->DeleteObjects(objs);
+        if (errList != nullptr)
         {
-            ++removed;
-        }
-        else
-        {
-            char fmt[512];
-            sprintf_s(fmt, sizeof(fmt), "  [Step9] 警告：删除参考几何失败 tag=%llu（保留在草图中）",
-                      (unsigned long long)t);
-            CommonUtils::print_msg(fmt);
+            errors = errList->Length();
+            delete errList;
         }
     }
-    return removed;
+    catch (const NXOpen::NXException& e)
+    {
+        CommonUtils::print_msg(std::string("  [Step9] 警告：Sketch::DeleteObjects 异常: ") + e.Message());
+        errors = (int)objs.size();
+    }
+    catch (...)
+    {
+        CommonUtils::print_msg("  [Step9] 警告：Sketch::DeleteObjects 未知异常，参考几何保留");
+        errors = (int)objs.size();
+    }
+    if (errors > 0)
+    {
+        std::string msg = "  [Step9] 警告：参考几何删除失败 ";
+        msg += std::to_string(errors);
+        msg += " 条（保留在草图中）";
+        CommonUtils::print_msg(msg.c_str());
+    }
+    return (int)objs.size() - errors;
 }
 
 //==============================================================================
@@ -1063,9 +1109,9 @@ static void do_it()
         }
         sheet->Open();
         {
-            std::string nameLine = "[Step9] 当前工作图纸 ";
-            nameLine += sheet->Name().GetUTF8Text();
-            CommonUtils::print_msg(nameLine);
+            char fmt[512];
+            sprintf_s(fmt, sizeof(fmt), "[Step9] 当前工作图纸 %s", sheet->Name().GetUTF8Text());
+            CommonUtils::print_msg(fmt);
         }
 
         // ===== 云线参数对话框：波浪直径（每波弦长）控制云线疏密 =====
@@ -1154,14 +1200,15 @@ static void do_it()
                         if (draw_one_cloud(pts, kind, src) != NULL_TAG)
                         {
                             ++ok;
-                            int removed = delete_shape_sources(s);   // 成功后删除参考几何
+                            int removed = delete_shape_sources(sk, s);   // 成功后删除参考几何（草图 API）
                             if (removed > 0)
                             {
-                                char fmt[512];
-                                sprintf_s(fmt, sizeof(fmt),
-                                          "  [Step9] 云线生成成功，已删除参考%s几何 %d 条（开关 kDeleteSourceGeometry）",
-                                          kind, removed);
-                                CommonUtils::print_msg(fmt);
+                                std::string msg = "  [Step9] 云线生成成功，已删除参考";
+                                msg += kind;
+                                msg += "几何 ";
+                                msg += std::to_string(removed);
+                                msg += " 条（开关 kDeleteSourceGeometry）";
+                                CommonUtils::print_msg(msg.c_str());
                             }
                         }
                     }

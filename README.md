@@ -82,6 +82,8 @@ NX12_MultiModule.sln
 
 ## 版本
 
+- **v1.4.2**（2026-09-01）Step9 v6 编译兼容修复：NXObjectManager 类型转换、no_init_all 屏蔽、日志格式误报消除；详见 CHANGELOG.md
+- **v1.4.1**（2026-09-01）Step9 v5 修复：参考几何删除改用 Sketch::DeleteObjects；图纸名日志乱码修复；详见 CHANGELOG.md
 - **v1.4.0**（2026-09-01）Step9 v4：生成云线后自动删除参考草图矩形/圆形几何（开关 kDeleteSourceGeometry）；详见 CHANGELOG.md
 - **v1.3.0**（2026-09-01）Step9 v3：云线参数对话框（波浪直径可调，控制云线疏密）；详见 CHANGELOG.md
 - **v1.2.0**（2026-09-01）Step9 v2 草图驱动重构：自动识别图纸草图矩形/圆形并转云线，无草图回退默认参数；详见 CHANGELOG.md
