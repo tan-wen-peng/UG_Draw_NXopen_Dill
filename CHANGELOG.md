@@ -2,6 +2,21 @@
 
 本文件记录 E:\UG（UG_Draw_NXopen_Dill）的发布历史。版本规则：vMAJOR.MINOR.PATCH。
 
+## [1.4.0] - 2026-09-01 —— Step9 v4 生成云线后自动删除参考草图几何
+
+### 变更（Step9_CloudLines\NX12_Step9_CloudLines.cpp）
+- 云线生成成功后自动删除作为参考的草图矩形（4 条直线）/ 圆形（完整圆或大圆弧）几何，
+  草图本身保留；删除仅在对应形状云线创建成功后执行，失败则保留几何以便重试。
+- 新增配置开关 kDeleteSourceGeometry（默认 true；改为 false 可保留参考几何）。
+- 识别结构 RectInfo/CircleInfo/ShapeRec 增加来源曲线 tag 携带（矩形 4 线 / 圆 1 条曲线），
+  删除走 UF_OBJ_delete_object 逐 tag 处理并记录日志。
+- 幂等语义不变：已转换草图仍打 STEP9_SKETCH，其云线保留；如需改疏密请重画草图
+  （或先关闭 kDeleteSourceGeometry 再运行）。
+
+### 部署
+- 与 1.1.0~1.3.0 相同：构建 NX12_MultiModule.sln（Release x64）后部署 DLL；
+  twp_toolbox.men 菜单注册仍为 GBK 手工追加，未变。
+
 ## [1.3.0] - 2026-09-01 —— Step9 v3 云线参数对话框（波浪直径可调）
 
 ### 变更（Step9_CloudLines\NX12_Step9_CloudLines.cpp）

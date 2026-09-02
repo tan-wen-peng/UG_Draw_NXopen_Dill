@@ -2,7 +2,13 @@
 // NX12 Step9：云线（修订云线）自动绘制（DLL 9/9）
 //------------------------------------------------------------------------------
 // 版本历史：
-//   v3 (2026-09-01) 云线参数对话框（本文件最新）：
+//   v4 (2026-09-01) 参考几何自动删除（本文件最新）：
+//     · 云线生成成功后，自动删除作为参考的草图矩形（4 条直线）/ 圆形（圆或大圆弧）
+//       几何，草图本身保留；由配置开关 kDeleteSourceGeometry 控制（默认开启，
+//       改为 false 可保留参考几何）；
+//     · 仅在该形状的云线创建成功后才删除；创建失败时保留草图几何以便重试；
+//     · 幂等语义不变：已转换草图仍打 STEP9_SKETCH 标记，其云线保留。
+//   v3 (2026-09-01) 云线参数对话框：
 //     · 新增运行时“云线参数”对话框（Win32 内存 DLGTEMPLATE + DialogBoxIndirectW，
 //       与 Step6 同一范式，无需资源文件）：输入“波浪直径（每波弦长，mm）”，
 //       默认 8.0，数值越小云线越密、越大越疏，直接控制半圆弧波浪大小；
@@ -73,6 +79,7 @@
 // —— 草图驱动 ——
 static constexpr bool  kSketchDriven            = true;   // 草图驱动开关：true=扫描图纸草图；false=直接回退默认参数
 static constexpr bool  kReprocessMarkedSketches = false;  // true=重新处理已打标记的草图（修改草图后临时改 true 重画）
+static constexpr bool  kDeleteSourceGeometry     = true;   // true=云线生成成功后自动删除参考草图几何（矩形4线/圆）；false=保留
 
 // —— 识别容差 ——
 static constexpr double kEndPointTolerance         = 0.01;  // 直线端点闭合判定容差（mm）
@@ -239,10 +246,10 @@ struct LineRec { tag_t tag; double sx; double sy; double ex; double ey; };
 struct ArcRec { tag_t tag; double cx; double cy; double r; double sweepDeg; bool full; };
 
 /** 矩形识别结果 */
-struct RectInfo { double cx; double cy; double width; double height; double angleDeg; };
+struct RectInfo { double cx; double cy; double width; double height; double angleDeg; std::vector<tag_t> lineTags; };
 
 /** 圆形识别结果 */
-struct CircleInfo { double cx; double cy; double radius; };
+struct CircleInfo { double cx; double cy; double radius; tag_t tag; };
 
 /** 识别的形状（矩形/圆形统一载体） */
 struct ShapeRec
@@ -255,6 +262,7 @@ struct ShapeRec
     double height;    // 矩形高
     double radius;    // 圆半径
     double angleDeg;  // 矩形倾角（度，宽边方向）
+    std::vector<tag_t> sourceTags;  // 参考草图几何 tag（矩形=4 条直线；圆=圆/大圆弧曲线）
 };
 
 /** 草图几何统计（诊断日志用） */
@@ -897,7 +905,12 @@ static bool detect_rectangle(const std::vector<LineRec>& lines, std::set<tag_t>&
 
             out.cx = cx; out.cy = cy;
             out.width = w; out.height = h; out.angleDeg = angleDeg;
-            for (int k = 0; k < 4; ++k) used.insert(lines[chain[k]].tag);
+            out.lineTags.clear();
+            for (int k = 0; k < 4; ++k)
+            {
+                used.insert(lines[chain[k]].tag);
+                out.lineTags.push_back(lines[chain[k]].tag);   // 记录来源直线，云线成功后删除
+            }
             return true;
         }
     }
@@ -925,7 +938,7 @@ static void detect_circles(const std::vector<ArcRec>& arcs, std::vector<CircleIn
         }
         if (dup) continue;
         CircleInfo c;
-        c.cx = a.cx; c.cy = a.cy; c.radius = a.r;
+        c.cx = a.cx; c.cy = a.cy; c.radius = a.r; c.tag = a.tag;
         out.push_back(c);
     }
 }
@@ -962,6 +975,7 @@ static int recognize_sketch_shapes(NXOpen::Sketch* sk, std::vector<ShapeRec>& ou
         s.width = ri.width; s.height = ri.height;
         s.angleDeg = ri.angleDeg;
         s.radius = 0.0;
+        s.sourceTags = ri.lineTags;
         out.push_back(s);
         sprintf_s(fmt, sizeof(fmt),
                   "[Step9 识别] 矩形：中心(%.2f, %.2f) 宽 %.2f 高 %.2f 倾角 %.2f°（4 条直线闭合）",
@@ -978,12 +992,43 @@ static int recognize_sketch_shapes(NXOpen::Sketch* sk, std::vector<ShapeRec>& ou
         s.cx = c.cx; s.cy = c.cy;
         s.radius = c.radius;
         s.width = 0.0; s.height = 0.0; s.angleDeg = 0.0;
+        s.sourceTags.clear();
+        s.sourceTags.push_back(c.tag);
         out.push_back(s);
         sprintf_s(fmt, sizeof(fmt),
                   "[Step9 识别] 圆：圆心(%.2f, %.2f) 半径 %.2f", c.cx, c.cy, c.radius);
         CommonUtils::print_msg(fmt);
     }
     return (int)out.size();
+}
+
+/**
+ * @brief 云线生成成功后删除参考草图几何（矩形 4 条直线 / 圆或大圆弧曲线）。
+ * 由配置开关 kDeleteSourceGeometry 控制（默认开启）；只删除该形状对应的来源
+ * 曲线，草图本身保留；删除失败逐 tag 记录日志，不影响流程。
+ * @param s 已生成云线的形状（携带来源曲线 tag）
+ * @return 实际删除的曲线数
+ */
+static int delete_shape_sources(const ShapeRec& s)
+{
+    if (!kDeleteSourceGeometry || s.sourceTags.empty()) return 0;
+    int removed = 0;
+    for (auto t : s.sourceTags)
+    {
+        if (t == NULL_TAG) continue;
+        if (UF_OBJ_delete_object(t) == 0)
+        {
+            ++removed;
+        }
+        else
+        {
+            char fmt[512];
+            sprintf_s(fmt, sizeof(fmt), "  [Step9] 警告：删除参考几何失败 tag=%llu（保留在草图中）",
+                      (unsigned long long)t);
+            CommonUtils::print_msg(fmt);
+        }
+    }
+    return removed;
 }
 
 //==============================================================================
@@ -1106,7 +1151,19 @@ static void do_it()
                             continue;
                         }
                         const char* kind = (s.kind == ShapeRec::Kind::Rect) ? "矩形" : "圆形";
-                        if (draw_one_cloud(pts, kind, src) != NULL_TAG) ++ok;
+                        if (draw_one_cloud(pts, kind, src) != NULL_TAG)
+                        {
+                            ++ok;
+                            int removed = delete_shape_sources(s);   // 成功后删除参考几何
+                            if (removed > 0)
+                            {
+                                char fmt[512];
+                                sprintf_s(fmt, sizeof(fmt),
+                                          "  [Step9] 云线生成成功，已删除参考%s几何 %d 条（开关 kDeleteSourceGeometry）",
+                                          kind, removed);
+                                CommonUtils::print_msg(fmt);
+                            }
+                        }
                     }
 
                     if (ok > 0)
