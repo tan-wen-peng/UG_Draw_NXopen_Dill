@@ -2,7 +2,12 @@
 // NX12 Step9：云线（修订云线）自动绘制（DLL 9/9）
 //------------------------------------------------------------------------------
 // 版本历史：
-//   v6 (2026-09-01) 编译兼容修复（本文件最新）：
+//   v7 (2026-09-01) 曲线级幂等，草图可复用（本文件最新）：
+//     · 废弃草图级 STEP9_SKETCH 标记（它导致整个草图被永久跳过，无法再画新图形
+//       生成云线）；改为曲线级 STEP9_DONE 标记：云线创建成功后先标记来源曲线、
+//       再删除参考几何，新画的矩形/圆永远会被处理，旧云线保留不删。
+//     · kReprocessMarkedSketches 配置项随草图级标记一并移除。
+//   v6 (2026-09-01) 编译兼容修复：
 //     · NXObjectManager::Get 返回 TaggedObject*，删除参考几何时先 dynamic_cast 到
 //       NXObject* 再交给 Sketch::DeleteObjects（修复 C2440/E0144）；
 //     · 预定义 DECLSPEC_NOINITALL 置空，屏蔽 SDK 10.0.19041 winnt.h 的
@@ -19,7 +24,7 @@
 //       几何，草图本身保留；由配置开关 kDeleteSourceGeometry 控制（默认开启，
 //       改为 false 可保留参考几何）；
 //     · 仅在该形状的云线创建成功后才删除；创建失败时保留草图几何以便重试；
-//     · 幂等语义不变：已转换草图仍打 STEP9_SKETCH 标记，其云线保留。
+//     · 幂等语义不变：已转换草图仍打 STEP9_SKETCH 标记，其云线保留（v7 起改为曲线级 STEP9_DONE）。
 //   v3 (2026-09-01) 云线参数对话框：
 //     · 新增运行时“云线参数”对话框（Win32 内存 DLGTEMPLATE + DialogBoxIndirectW，
 //       与 Step6 同一范式，无需资源文件）：输入“波浪直径（每波弦长，mm）”，
@@ -34,7 +39,7 @@
 //     3) 圆形识别：完整圆（或扫略角 >= 270 度的圆弧），提取圆心/半径；
 //     4) 云线参数（位置/尺寸）直接继承自识别结果，替代硬编码配置常量；
 //     5) 向后兼容：无可识别草图时回退 kFallback* 默认配置（等同 v1 行为）；
-//     6) 幂等保护：已转换草图打 STEP9_SKETCH 属性不再重复处理；云线打 STEP9_CLOUD
+//     6) 幂等保护：已转换曲线打 STEP9_DONE 属性不再重复处理（曲线级幂等，草图可复用）；云线打 STEP9_CLOUD
 //        字符串属性（值 = "DEFAULT" 或 "SKETCH:<tag>"），重画同源云线前先删旧线；
 //        v1 整数属性旧云线自动迁移清理，不误删其它样条；
 //     7) 模块化拆分：草图枚举 / 几何分类 / 矩形识别 / 圆形识别 / 云线生成 /
@@ -80,7 +85,7 @@
 #include <NXOpen/SketchCollection.hxx>      // Part::Sketches() 枚举
 #include <NXOpen/DraftingManager.hxx>          // Part::Drafting() 完整类型（EnterDraftingApplication）
 #include <NXOpen/ErrorList.hxx>                // Sketch::DeleteObjects 返回的错误列表
-#include <uf_attr.h>                        // UF_ATTR_*（STEP9_CLOUD / STEP9_SKETCH 用户属性）
+#include <uf_attr.h>                        // UF_ATTR_*（STEP9_CLOUD / STEP9_DONE 用户属性）
 #include <uf_csys.h>                        // UF_CSYS_ask_matrix_values（圆弧中心矩阵换算）
 #include <uf_object_types.h>                // UF_line_type / UF_circle_type / UF_spline_type / UF_conic_type（草图几何分类）
 #include <math.h>                           // sqrt / cos / sin / fabs / atan2
@@ -96,7 +101,6 @@
 
 // —— 草图驱动 ——
 static constexpr bool  kSketchDriven            = true;   // 草图驱动开关：true=扫描图纸草图；false=直接回退默认参数
-static constexpr bool  kReprocessMarkedSketches = false;  // true=重新处理已打标记的草图（修改草图后临时改 true 重画）
 static constexpr bool  kDeleteSourceGeometry     = true;   // true=云线生成成功后自动删除参考草图几何（矩形4线/圆）；false=保留
 
 // —— 识别容差 ——
@@ -125,7 +129,7 @@ static constexpr int    kCloudColor    = 4;     // NX 颜色索引（4=红，修
 
 // —— 幂等标记属性名（勿与其它模块冲突） ——
 static const char kAttrCloudTitle[]  = "STEP9_CLOUD";   // 云线（值：DEFAULT / SKETCH:<tag>）
-static const char kAttrSketchTitle[] = "STEP9_SKETCH";  // 已转换草图（整数 1）
+static const char kAttrDoneTitle[]   = "STEP9_DONE";    // 已转换曲线（整数 1，曲线级幂等；旧版草图级 STEP9_SKETCH 不再读取）
 
 // 圆周率（math.h 的 M_PI 需 _USE_MATH_DEFINES，直接自备常量）
 static constexpr double kPI = 3.14159265358979323846;   // 与 uf_defs.h 的 PI 宏区分
@@ -293,6 +297,7 @@ struct SketchGeomStats
     int splines = 0;       // 样条
     int conics = 0;        // 圆锥曲线
     int others = 0;        // 其它（点等）
+    int doneSkipped = 0;   // 已打 STEP9_DONE 的曲线（已转换，跳过）
 };
 
 //==============================================================================
@@ -514,7 +519,7 @@ static void style_cloud(tag_t tag)
 }
 
 //==============================================================================
-// 幂等属性管理（云线 STEP9_CLOUD / 草图 STEP9_SKETCH）
+// 幂等属性管理（云线 STEP9_CLOUD / 曲线 STEP9_DONE）
 //==============================================================================
 
 /** 云线属性读取结果 */
@@ -622,30 +627,31 @@ static std::string make_sketch_source(tag_t sketchTag)
 }
 
 /**
- * @brief 判断草图是否已打 STEP9_SKETCH 标记（已转换，默认跳过）。
+ * @brief 判断草图曲线是否已转换（带 STEP9_DONE 整数属性）。
+ * 曲线级幂等：已转换曲线跳过，新画的曲线总是会处理（草图本身不再打标记）。
  */
-static bool is_sketch_marked(NXOpen::Sketch* sk)
+static bool is_curve_done(tag_t curveTag)
 {
-    if (sk == nullptr) return false;
+    if (curveTag == NULL_TAG) return false;
     UF_ATTR_info_t info;
     UF_ATTR_init_user_attribute_info(&info);
     logical has = FALSE;
     UF_ATTR_get_user_attribute_with_title_and_type(
-        sk->Tag(), kAttrSketchTitle, UF_ATTR_integer, UF_ATTR_NOT_ARRAY, &info, &has);
+        curveTag, kAttrDoneTitle, UF_ATTR_integer, UF_ATTR_NOT_ARRAY, &info, &has);
     UF_ATTR_free_user_attribute_info_strings(&info);
     return has != FALSE;
 }
 
-/** 给草图打 STEP9_SKETCH 标记（转换成功后调用） */
-static void mark_sketch(NXOpen::Sketch* sk)
+/** 给草图曲线打 STEP9_DONE 标记（云线创建成功后调用，先标记后删除） */
+static void mark_curve_done(tag_t curveTag)
 {
-    if (sk == nullptr) return;
+    if (curveTag == NULL_TAG) return;
     UF_ATTR_info_t info;
     UF_ATTR_init_user_attribute_info(&info);
     info.type = UF_ATTR_integer;
-    info.title = const_cast<char*>(kAttrSketchTitle);
+    info.title = const_cast<char*>(kAttrDoneTitle);
     info.integer_value = 1;
-    UF_ATTR_set_user_attribute(sk->Tag(), &info, TRUE);
+    UF_ATTR_set_user_attribute(curveTag, &info, TRUE);
 }
 
 /**
@@ -775,6 +781,7 @@ static void collect_sketch_geometry(NXOpen::Sketch* sk,
         tag_t tag = obj->Tag();
         int t = 0, sub = 0;
         if (UF_OBJ_ask_type_and_subtype(tag, &t, &sub) != 0) { ++stats.others; continue; }
+        if (is_curve_done(tag)) { ++stats.doneSkipped; continue; }   // 曲线级幂等：已转换曲线跳过
 
         if (t == UF_line_type)
         {
@@ -977,10 +984,10 @@ static int recognize_sketch_shapes(NXOpen::Sketch* sk, std::vector<ShapeRec>& ou
 
     char fmt[512];
     sprintf_s(fmt, sizeof(fmt),
-              "[Step9 草图] 名称 %s tag=%llu 几何统计：直线 %d / 完整圆 %d / 大圆弧 %d / 小圆弧 %d / 样条 %d / 圆锥 %d / 其它 %d",
+              "[Step9 草图] 名称 %s tag=%llu 几何统计：直线 %d / 完整圆 %d / 大圆弧 %d / 小圆弧 %d / 样条 %d / 圆锥 %d / 其它 %d / 已转换跳过 %d",
               sk->Name().GetUTF8Text(), (unsigned long long)sk->Tag(),
               stats.lines, stats.circles, stats.arcCandidates, stats.smallArcs,
-              stats.splines, stats.conics, stats.others);
+              stats.splines, stats.conics, stats.others, stats.doneSkipped);
     CommonUtils::print_msg(fmt);
 
     std::set<tag_t> used;
@@ -1152,40 +1159,22 @@ static void do_it()
                 CommonUtils::print_msg(fmt);
             }
 
-            int processed = 0, markedSkipped = 0;
+            int processed = 0;
             for (auto* sk : sketches)
             {
                 if (sk == nullptr) continue;
                 try
                 {
-                    if (!kReprocessMarkedSketches && is_sketch_marked(sk))
-                    {
-                        ++markedSkipped;
-                        char fmt[512];
-                        sprintf_s(fmt, sizeof(fmt),
-                                  "[Step9 草图] 名称 %s 已转换过（STEP9_SKETCH），跳过；如需随草图修改重画，把 kReprocessMarkedSketches 改为 true 后重跑",
-                                  sk->Name().GetUTF8Text());
-                        CommonUtils::print_msg(fmt);
-                        continue;
-                    }
-
                     std::vector<ShapeRec> shapes;
                     int found = recognize_sketch_shapes(sk, shapes);
                     if (found <= 0)
                     {
-                        CommonUtils::print_msg("  [Step9 草图] 未识别到矩形或圆形，本次跳过（不标记，可修改草图后重跑）");
+                        CommonUtils::print_msg("  [Step9 草图] 未识别到新的矩形或圆形（已转换曲线自动跳过），本次无需处理");
                         continue;
                     }
 
-                    // 同源旧云线先删后画（幂等重画）
+                    // 曲线级幂等：新曲线生成新云线，旧云线保留；不再按草图整批删除
                     std::string src = make_sketch_source(sk->Tag());
-                    int removed = delete_clouds_by_source(part, src);
-                    if (removed > 0)
-                    {
-                        char fmt[512];
-                        sprintf_s(fmt, sizeof(fmt), "  [Step9 草图] 同源旧云线已删除 %d 条，即将重画", removed);
-                        CommonUtils::print_msg(fmt);
-                    }
 
                     int ok = 0;
                     for (const auto& s : shapes)
@@ -1200,7 +1189,8 @@ static void do_it()
                         if (draw_one_cloud(pts, kind, src) != NULL_TAG)
                         {
                             ++ok;
-                            int removed = delete_shape_sources(sk, s);   // 成功后删除参考几何（草图 API）
+                            for (auto t : s.sourceTags) mark_curve_done(t);   // 先标记，防删除失败时重复转换
+                            int removed = delete_shape_sources(sk, s);       // 成功后删除参考几何（草图 API）
                             if (removed > 0)
                             {
                                 std::string msg = "  [Step9] 云线生成成功，已删除参考";
@@ -1215,11 +1205,10 @@ static void do_it()
 
                     if (ok > 0)
                     {
-                        mark_sketch(sk);
                         ++processed;
                         sketchClouds += ok;
                         char fmt[512];
-                        sprintf_s(fmt, sizeof(fmt), "  [Step9 草图] 转换完成：生成云线 %d 条，草图已打 STEP9_SKETCH 标记", ok);
+                        sprintf_s(fmt, sizeof(fmt), "  [Step9 草图] 转换完成：新生成云线 %d 条（旧云线保留，草图可继续加图形复用）", ok);
                         CommonUtils::print_msg(fmt);
                     }
                 }
@@ -1239,8 +1228,8 @@ static void do_it()
             {
                 char fmt[512];
                 sprintf_s(fmt, sizeof(fmt),
-                          "[Step9 草图驱动] 处理草图 %d 个，生成云线 %d 条；已标记跳过 %d 个",
-                          processed, sketchClouds, markedSkipped);
+                          "[Step9 草图驱动] 处理草图 %d 个，新生成云线 %d 条（曲线级幂等，草图可复用）",
+                          processed, sketchClouds);
                 CommonUtils::print_msg(fmt);
             }
         }

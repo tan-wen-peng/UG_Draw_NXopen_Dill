@@ -1,4 +1,4 @@
-# twp工具箱 —— NX12 统一菜单部署说明（v1.7）
+# twp工具箱 —— NX12 统一菜单部署说明（v1.9）
 
 将 E:\UG 下的全部 NXOpen C++ 工具统一注册到 NX12，统一入口 **twp工具箱**。
 主入口在 **主菜单栏（帮助 菜单左侧，常驻可见）**；同时在 **应用模块（Applications）页签** 注册了同名应用按钮。
@@ -17,7 +17,7 @@
 | 5 | 5.中心线 | NX12_Step5_Centerlines.dll | ufusr（直接调用） | NX12_Step5_Centerlines.dll | ✅ | 已注册 |
 | 6 | 6.图层切换 | NX12_Step6_LayerSwitch.dll | ufusr（直接调用） | NX12_Step6_LayerSwitch.dll | ✅ | 已注册 |
 | 7 | 7.尺寸后缀追加 | NX12_Step7_AppendSuffix.dll | ufusr（直接调用） | NX12_Step7_AppendSuffix.dll | ✅ | 已注册 |
-| 8 | 9.云线（草图驱动：矩形/圆形修订云线，直径可调，成功即删参考几何） | NX12_Step9_CloudLines.dll | ufusr（直接调用） | NX12_Step9_CloudLines.dll | ✅ | **待手工追加**（见第五节） |
+| 8 | 9.云线（草图驱动：矩形/圆形修订云线，直径可调，成功即删参考几何，草图可复用） | NX12_Step9_CloudLines.dll | ufusr（直接调用） | NX12_Step9_CloudLines.dll | ✅ | **待手工追加**（见第五节） |
 | 9 | 打标图坐标创建 | dbt_step1.dll | ufusr（直接调用） | dbt_step1.dll | ✅ | 已注册 |
 | 10 | 爆炸图自动布局 | explosion_step1.dll | ufusr（直接调用） | explosion_step1.dll | ✅ | 已注册 |
 | 11 | 爆炸参数提取 | explosion_step2.dll | ufusr（直接调用） | explosion_step2.dll | ✅ | 已注册 |
@@ -26,6 +26,7 @@
 
 说明：
 - 前 12 个（含 Step9 云线）是纯 ufusr 工具：ACTIONS 直接写磁盘 DLL 文件名，NX 点按钮时加载 DLL 并调用 ufusr，执行完按 ufusr_ask_unload=Immediately 卸载。
+- Step3 坐标标注 2026-09-05 升级为交互式（v2）：选线段 + 带捕捉原点 + 方向/间隔对话框；菜单注册不变，仅重编译部署 DLL。
 - titleblock_fill.dll 是 MenuBar 型应用：动作名在 NX12_Step8_TitleBlockFill.cpp 的 ufsta 中通过 AddMenuAction("TITLEFILL_APP__...") 注册，.men 中 ACTIONS 必须与其**逐字一致**；ufusr_ask_unload 固定返回 AtTermination。
   **首次使用「标题栏填写」前，请先到「应用模块」页签点击一次 twp工具箱 按钮**（触发 LIBRARIES 加载并注册动作），此后三个按钮即可正常使用。
 - 旧的整体式 NX12_NXOpenCPP_Wizard1.dll（2026-08-07）已被 Step1-7 多模块版取代，不再注册。

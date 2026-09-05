@@ -2,6 +2,45 @@
 
 本文件记录 E:\UG（UG_Draw_NXopen_Dill）的发布历史。版本规则：vMAJOR.MINOR.PATCH。
 
+## [1.6.0] - 2026-09-05 —— Step3 v2 交互式重构（选线段 + 带捕捉原点 + 方向/间隔对话框）
+
+### 变更（Step3_OrdinateDimensions\NX12_Step3_OrdinateDimensions.cpp）
+- 废弃 v1 的"自动枚举剖视图轮廓端点 + 中心线/截面边启发式基准"模式（自动生成
+  不准确），改为完全交互式：
+  1) SelectTaggedObjects 多选投影线段（任意视图光标，UF_UI_set_cursor_view(0)）；
+  2) UF_UI_point_construct（推断点模式）带捕捉点选坐标原点（端点/中点/圆心）；
+  3) 在 enumerate_view_curves 结果中吸附最近曲线特征点（容差 0.05）作基准关联
+     对象——NXOpen::Point 继承 SmartObject 而非 DisplayableObject，不能直接作
+     OrdinateOrigin 关联对象；拾取产生的临时关联点随即删除（失败仅告警）；
+  4) 内存对话框（Step6 同款范式）指定测量方向（垂直坐标标注=测X / 水平坐标
+     标注=测Y）与排列间隔（mm，默认 9.0，0.5~200 校验）；
+  5) 每条线段两端点（0.01 容差去重）按坐标值升序排序，沿录制 VB 同款链式
+     逐条 Commit（首条产基准标注 + CreateInferredMargin 链式 margin + 显式放置
+     原点按间隔步进）。
+- 链式 margin 创建移出基准标注扫描分支：无论基准来自 GetCommittedObjects 还是
+  Dimensions() 扫描定位，都创建链式 margin（v1 仅在扫描路径创建，主路径缺 margin）。
+- 保留任务#17 教训：被测端点过滤承载对象即基准曲线的点、以及与原点重合的点。
+- 幂等保护降级为警示：本视图已有坐标标注仅打印数量告警，不再拦截（交互模式
+  用户有意追加标注；重复标注由用户自查）。
+- Step3 不再依赖 Step5 中心线；README_多模块架构.md 依赖关系同步更新。
+
+### 部署
+- 同前：构建 NX12_MultiModule.sln（Release x64）后部署 DLL，菜单注册不变。
+
+## [1.5.0] - 2026-09-01 —— Step9 v7 草图复用（曲线级幂等）
+
+### 变更（Step9_CloudLines\NX12_Step9_CloudLines.cpp）
+- 废弃草图级 STEP9_SKETCH 标记（旧逻辑导致整个草图被永久跳过，再画矩形不再生成
+  云线）；改为曲线级幂等：云线创建成功后先给来源曲线打 STEP9_DONE、再删除参考几何。
+- 新语义：同一草图可以反复加画矩形/圆形并重复运行，新图形总是被识别转换；
+  已转换曲线自动跳过（几何统计日志新增“已转换跳过”计数）；旧云线保留不再整批删除；
+  kReprocessMarkedSketches 配置项移除。
+- 幂等链不变：云线 STEP9_CLOUD 字符串属性（DEFAULT / SKETCH:<tag>）保留；
+  默认回退模式仍按 DEFAULT 来源先删后画。
+
+### 部署
+- 同前：构建 NX12_MultiModule.sln（Release x64）后部署 DLL，菜单注册不变。
+
 ## [1.4.2] - 2026-09-01 —— Step9 v6 编译兼容修复
 
 ### 修复

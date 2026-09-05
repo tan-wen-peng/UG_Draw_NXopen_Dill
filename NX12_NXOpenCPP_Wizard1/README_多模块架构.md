@@ -53,7 +53,7 @@ e:\UG\NX12_NXOpenCPP_Wizard1\
 | 1 | `NX12_Step1_SheetAndViews.dll` | 创建图纸（A4 横向）、载体基础视图、A-A 全剖视图、两步法精确定位、剖视比例 | 无（首先运行） |
 | 2 | `NX12_Step2_SheetPreferences.dll` | 图纸首选项：尺寸文本字体/大小、视图标签样式 | Step1（需有图纸） |
 | 5 | `NX12_Step5_Centerlines.dll` | 交互拾取投影边生成中心线 | Step1（需有剖视图） |
-| 3 | `NX12_Step3_OrdinateDimensions.dll` | 自动枚举剖视轮廓端点，成组水平/垂直坐标标注 | Step1 + Step5（需剖视图 + 中心线） |
+| 3 | `NX12_Step3_OrdinateDimensions.dll` | 交互拾取投影线段 + 带捕捉点选原点 + 对话框指定方向/间隔，按坐标值排序链式生成坐标标注 | Step1（需有剖视图） |
 | 4 | `NX12_Step4_LinearDimensions.dll` | 交互拾取边生成线性/直径标注 | Step1（需有剖视图） |
 | 6 | `NX12_Step6_LayerSwitch.dll` | 工序图层切换对话框 | 无（独立运行） |
 | 7 | `NX12_Step7_AppendSuffix.dll` | 剖视图尺寸按 D/L 分组追加 (D1)/(L1) 后缀 | Step1（需有剖视图） |
@@ -64,7 +64,7 @@ e:\UG\NX12_NXOpenCPP_Wizard1\
 
 > Step7/Step8/Step9 均在 Step1 之后任意时机独立执行（Step9 要求目标图纸处于打开/显示状态）。
 
-> **说明：** Step5 需在 Step3 之前运行，因为 Step3 的坐标标注以 Step5 创建的中心线作为基准。Step2 和 Step6 可在任意时机独立执行。
+> **说明：** Step3（v2 交互式）坐标原点由用户带捕捉点选，不再依赖 Step5 中心线，可在 Step1 之后任意时机运行。Step2 和 Step6 可在任意时机独立执行。
 
 ---
 
@@ -164,10 +164,10 @@ MSBuild 共享属性文件，统一所有项目的编译链接配置：
 
 ## 8. 注意事项
 
-1. **Step3 依赖 Step5**：Step3 的坐标标注以 Step5 创建的中心线作为基准；中心线不可用时 Step3 会降级警告跳过，不中断主流程
+1. **Step3 交互式（v2）**：先多选投影线段，再带捕捉点选坐标原点（端点/中点/圆心），对话框指定测量方向（垂直=测X / 水平=测Y）与排列间隔（mm）；每条线段两端点按坐标值升序排序后链式生成；重复运行会追加标注（仅告警不拦截），请自查重复标注
 2. **Step1 幂等保护**：同名图纸复用（不会重复创建）、已有视图跳过，可安全重复执行
 3. **即时卸载**：每个 DLL 加载后立即卸载（`LibraryUnloadOptionImmediately`），不驻留内存
 4. **windows.h 防护**：每个需要对话框的 DLL 保留 `WIN32_LEAN_AND_MEAN`、`NOMINMAX`、`#undef CreateDialog`，避免与 NXOpen 头文件冲突
-5. **Step9 云线说明（v4 草图驱动 + 直径对话框 + 参考几何自动删除）**：NX12 制图模块无原生“云线”命令，Step9 用封闭周期样条（`UF_CURVE_create_spline_thru_pts`，degree=3、periodicity=1）拟合波浪半圆弧；优先扫描当前图纸上的制图草图（`Sketch::IsDraftingSketch` + 图纸视图匹配），自动识别 4 直线闭合矩形与完整圆/大圆弧并继承其位置尺寸生成云线；无可用草图时回退 `kFallback*` 默认配置（v1 行为）；幂等标记：草图 `STEP9_SKETCH`（不重复处理）、云线 `STEP9_CLOUD`（值 `DEFAULT` / `SKETCH:<tag>`，重画同源先删旧线，v1 整数属性旧云线自动迁移清理）；波浪直径（云线疏密）运行时由“云线参数”对话框输入（默认 8.0 mm，配置常量 `kWaveChordDefault` 为默认值，取消对话框则本次不画）；云线生成成功后自动删除参考草图几何（开关 `kDeleteSourceGeometry`，默认开启，改为 false 可保留）；其余参数与容差在 `Step9_CloudLines\NX12_Step9_CloudLines.cpp` 顶部配置区调整
+5. **Step9 云线说明（v7 草图驱动 + 直径对话框 + 参考几何自动删除 + 草图复用）**：NX12 制图模块无原生“云线”命令，Step9 用封闭周期样条（`UF_CURVE_create_spline_thru_pts`，degree=3、periodicity=1）拟合波浪半圆弧；优先扫描当前图纸上的制图草图（`Sketch::IsDraftingSketch` + 图纸视图匹配），自动识别 4 直线闭合矩形与完整圆/大圆弧并继承其位置尺寸生成云线；无可用草图时回退 `kFallback*` 默认配置（v1 行为）；幂等标记：草图 `STEP9_SKETCH`（不重复处理）、云线 `STEP9_CLOUD`（值 `DEFAULT` / `SKETCH:<tag>`，重画同源先删旧线，v1 整数属性旧云线自动迁移清理）；波浪直径（云线疏密）运行时由“云线参数”对话框输入（默认 8.0 mm，配置常量 `kWaveChordDefault` 为默认值，取消对话框则本次不画）；云线生成成功后自动删除参考草图几何（开关 `kDeleteSourceGeometry`，默认开启，改为 false 可保留）；曲线级幂等（`STEP9_DONE`）：同一草图可反复加画矩形/圆形重复运行，新图形总是被转换、旧云线保留；其余参数与容差在 `Step9_CloudLines\NX12_Step9_CloudLines.cpp` 顶部配置区调整
 6. **Step9 排障**：若信息窗口显示“已创建”但图纸上看不到云线（个别环境把曲线建到了模型空间），先核对云线图层（默认 1）是否被隐藏、识别出的坐标是否落在图幅内；草图已打 `STEP9_SKETCH` 标记后如需随草图修改重画，把 `kReprocessMarkedSketches` 改为 true 重跑（或删除草图上的该属性）
 5. **配置集中管理**：换零件或换模板时，只需修改 `NX12_CommonConfig.h` 中的配置值

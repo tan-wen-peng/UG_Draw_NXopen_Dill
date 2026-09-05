@@ -82,6 +82,8 @@ NX12_MultiModule.sln
 
 ## 版本
 
+- **v1.6.0**（2026-09-05）Step3 v2 交互式重构：多选线段 + 带捕捉点选原点 + 对话框（方向/间隔）+ 按坐标值排序生成坐标标注；详见 CHANGELOG.md
+- **v1.5.0**（2026-09-01）Step9 v7 草图复用：改为曲线级幂等（STEP9_DONE），同一草图可反复加画矩形/圆形生成云线；详见 CHANGELOG.md
 - **v1.4.2**（2026-09-01）Step9 v6 编译兼容修复：NXObjectManager 类型转换、no_init_all 屏蔽、日志格式误报消除；详见 CHANGELOG.md
 - **v1.4.1**（2026-09-01）Step9 v5 修复：参考几何删除改用 Sketch::DeleteObjects；图纸名日志乱码修复；详见 CHANGELOG.md
 - **v1.4.0**（2026-09-01）Step9 v4：生成云线后自动删除参考草图矩形/圆形几何（开关 kDeleteSourceGeometry）；详见 CHANGELOG.md

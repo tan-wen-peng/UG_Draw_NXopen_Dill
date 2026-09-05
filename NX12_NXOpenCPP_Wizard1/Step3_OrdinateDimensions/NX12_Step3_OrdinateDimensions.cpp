@@ -1,71 +1,241 @@
-﻿//------------------------------------------------------------------------------
+//------------------------------------------------------------------------------
 // NX12 Step3：坐标标注（DLL 3/6）
-// 功能：自动枚举剖视图轮廓边端点，生成成组水平/垂直坐标标注
+// 功能：交互拾取剖视图投影线段，用户点选带捕捉的坐标原点，对话框指定
+//       测量方向与排列间隔，按坐标值排序后链式生成坐标标注（Ordinate Dimension）
+//------------------------------------------------------------------------------
+// 版本历史：
+//   v2 (2026-09-05) 交互式重构（本文件最新）：
+//     · 废弃"自动枚举剖视图轮廓端点 + 中心线/截面边启发式基准"模式（v1），
+//       改为用户完全控制：多选线段（SelectTaggedObjects）→ 带捕捉点选原点
+//       （UF_UI_point_construct 推断点模式，可捕捉端点/中点/圆心）→ 对话框
+//       指定测量方向（垂直=测X / 水平=测Y）与排列间隔（mm）→ 每条线段两端点
+//       按坐标值升序排序后，沿录制 VB 同款链式逐条 Commit。
+//     · 原点关联策略：NXOpen::Point 继承 SmartObject 而非 DisplayableObject，
+//       不能直接作 OrdinateOrigin 关联对象；改为在 enumerate_view_curves 结果中
+//       搜索距拾取点最近的曲线特征点（端点/中点/圆心，容差 0.05mm），以
+//       特征曲线 + SnapType(Start/End/Mid/Center) + 精确特征点作基准；
+//       拾取产生的临时关联点随即 UF_OBJ_delete_object 删除（失败仅告警，
+//       点不可见不影响标注）。
+//     · 任务#17 教训保留：被测端点过滤掉承载对象即基准曲线的点，以及与原点
+//       重合（0.05mm 内）的点；任务#24 放置控制保留：显式放置原点按间隔步进。
+//     · 幂等保护降级为警示：检测到本视图已有坐标标注时仅打印数量告警，
+//       不再拦截（交互模式用户有意追加，且 v1 的全视图拦截误伤跨批次补标）。
+//     · Step3 不再依赖 Step5 中心线（原点由用户点选）。
+//   v1 (原) 自动枚举剖视图轮廓端点，成组水平/垂直坐标标注（中心线/截面边基准）。
 //------------------------------------------------------------------------------
 
-// Win32 防护 + 共享头文件
+// Win32 防护（本模块需要 windows.h 用于坐标标注参数对话框）
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+// 兼容旧工具链/IntelliSense：SDK 10.0.19041 winnt.h 的 DECLSPEC_NOINITALL
+// 使用 VS2019 16.5+ 才支持的 no_init_all 属性，旧版下置空（仅损失零初始化提示）
+#ifndef DECLSPEC_NOINITALL
+#define DECLSPEC_NOINITALL
+#endif
+#include <windows.h>
+#include <stdlib.h>                            // _wtof（对话框数值解析）
+#include <wchar.h>                             // swprintf_s（对话框默认值回显）
+#ifdef CreateDialog
+#undef CreateDialog
+#endif
+
+// 共享头文件（含 UF/NXOpen 基础 includes）
 #include "../Shared/NX12_CommonConfig.h"
 #include "../Shared/NX12_CommonUtils.h"
 
 // Step3 专有 includes
 #include <NXOpen/SelectDisplayableObject.hxx>
-#include <NXOpen/SelectDisplayableObjectList.hxx>
 #include <NXOpen/Annotations_OrdinateDimensionBuilder.hxx>
-#include <NXOpen/Annotations_OriginBuilder.hxx>
-#include <NXOpen/DisplayableObject.hxx>
-#include <NXOpen/NXMessageBox.hxx>
-#include <NXOpen/Drawings_SelectDraftingView.hxx>
-#include <NXOpen/Drawings_DraftingDrawingSheetCollection.hxx>
-#include <NXOpen/Drawings_DraftingDrawingSheet.hxx>
-#include <NXOpen/Drawings_DraftingViewCollection.hxx>
-#include <NXOpen/Drawings_BaseView.hxx>
-#include <NXOpen/DraftingManager.hxx>
-#include <algorithm>   // std::min/std::max（候选基准曲线极值筛选）
-#include <NXOpen/InferSnapType.hxx>                    // 录制 VB 同款 SetValue 需显式 snap 类型
 #include <NXOpen/Annotations_BaseOrdinateDimensionBuilder.hxx>
+#include <NXOpen/Annotations_OriginBuilder.hxx>
 #include <NXOpen/Annotations_OrdinateOriginDimension.hxx>  // 首条 Commit 产物，后续标注基准
-#include <NXOpen/Annotations_StyleBuilder.hxx>            // Style()->LineArrowStyle()（VB L1534 LeaderOrientation）
-#include <NXOpen/Annotations_LineArrowStyleBuilder.hxx>
-#include <NXOpen/Annotations.hxx>                         // LeaderSide 枚举
 #include <NXOpen/Annotations_Dimension.hxx>               // 首条产物类型诊断/链式容错
-#include <NXOpen/Annotations_HorizontalDimension.hxx>     // 首条产物类型诊断
-#include <NXOpen/Annotations_VerticalDimension.hxx>       // 首条产物类型诊断
 #include <NXOpen/Annotations_DimensionCollection.hxx>     // part->Dimensions() 扫描降级
-#include <NXOpen/Annotations_OrdinateMarginCollection.hxx>// VB L1564 CreateInferredMargin
+#include <NXOpen/Annotations_OrdinateMarginCollection.hxx>// CreateInferredMargin
 #include <NXOpen/Annotations_OrdinateMargin.hxx>          // SetActiveVertical/HorizontalMargin 参数
 #include <NXOpen/Annotations_AnnotationManager.hxx>       // part->Annotations()->OrdinateMargins() / NewAssociativity()
-#include <NXOpen/Annotations_Associativity.hxx>           // VB L1566-1596 margin 关联链
-#include <NXOpen/Annotations_Annotation.hxx>              // GetAssociativeOrigin / SetAssociativity / AssociativeOriginData
-#include <uf_object_types.h>        // UF_dimension_type / UF_dim_ordinate_*_subtype（幂等扫描）
+#include <NXOpen/Annotations_Associativity.hxx>           // margin 关联链
+#include <NXOpen/Annotations_Annotation.hxx>              // SetAssociativeOrigin / AssociativeOriginData
+#include <NXOpen/Annotations_StyleBuilder.hxx>            // Style()->LineArrowStyle()
+#include <NXOpen/Annotations_LineArrowStyleBuilder.hxx>
+#include <NXOpen/Annotations.hxx>                         // LeaderSide 枚举
+#include <NXOpen/InferSnapType.hxx>                       // SnapType 枚举（端点/中点/圆心）
+#include <NXOpen/DisplayableObject.hxx>
+#include <NXOpen/Selection.hxx>                           // SelectTaggedObjects（多选）
+#include <NXOpen/NXMessageBox.hxx>
+#include <NXOpen/DraftingManager.hxx>                     // part->Drafting()->EnterDraftingApplication()
+#include <uf_object_types.h>        // UF_dimension_type / UF_dim_ordinate_*_subtype
+#include <algorithm>                // std::stable_sort
+#include <stdio.h>                  // sprintf_s
+#include <vector>
 
 //==============================================================================
-// phase_auto_contour_dims —— 自动轮廓坐标标注（自由函数）
-// 从 MyClass 成员函数提取（原 L801-972）
-// 完整保留：UF_VIEW_cycle_objects + UF_VIEW_DEPENDENT_OBJECTS 视图成员遍历、UF_MODL_ask_curve_props 端点提取、
-// 0.01 容差去重、成组 OrdinateDimensionBuilder（水平+垂直）、失败降级单条模式
+// 配置区（通配修改点）
 //==============================================================================
-void phase_auto_contour_dims(NXOpen::Part* part,
-	NXOpen::Drawings::DraftingView* sectionView,
-	NXOpen::Annotations::Centerline2d* centerlineObj)
+static const double kDefaultSpacing = 9.0;    // 排列间隔默认值（mm，对话框可调）
+static const double kSpacingMin      = 0.5;   // 排列间隔下限（mm）
+static const double kSpacingMax      = 200.0; // 排列间隔上限（mm）
+static const double kOriginTol       = 0.05;  // 原点捕捉点匹配曲线特征点的容差（模型单位）
+static const double kDupTol          = 0.01;  // 端点去重容差（模型单位）
+
+//==============================================================================
+// 坐标标注参数对话框（Win32 内存模板，无需 .dlx 模板文件，Step6 同款范式）
+// 界面：测量方向单选（垂直坐标标注=测X / 水平坐标标注=测Y）+ 排列间隔编辑框
+//==============================================================================
+namespace OrdDlg
+{
+	const int IDC_DIR_VERT  = 1000;   // 垂直坐标标注（测 X 坐标）
+	const int IDC_DIR_HORIZ = 1001;   // 水平坐标标注（测 Y 坐标）
+	const int IDC_SPACING   = 1002;   // 排列间隔（mm）
+
+	struct Result
+	{
+		bool measureX;      // true=测 X（垂直坐标标注）；false=测 Y（水平坐标标注）
+		double spacing;     // 排列间隔（mm）
+	};
+	static Result g_result;
+	static double g_defSpacing;
+
+	struct Buf
+	{
+		BYTE d[8192];
+		size_t n;
+		Buf() : n(0) { memset(d, 0, sizeof(d)); }
+		void W(WORD v)      { memcpy(d + n, &v, 2); n += 2; }
+		void DW(DWORD v)    { memcpy(d + n, &v, 4); n += 4; }
+		void Str(const WCHAR* s) { size_t L = wcslen(s) + 1; memcpy(d + n, s, L * 2); n += L * 2; }
+		void Align()        { n = (n + 3) & ~(size_t)3; }
+	};
+
+	// 写入一个控件（类名用原子序号）
+	void AddItem(Buf& b, DWORD style, short x, short y, short cx, short cy,
+		WORD id, WORD clsOrd, const WCHAR* title)
+	{
+		b.Align();
+		b.DW(style);                    // style
+		b.DW(0);                        // dwExtendedStyle
+		b.W((WORD)x); b.W((WORD)y); b.W((WORD)cx); b.W((WORD)cy);
+		b.W(id);
+		b.W(0xFFFF); b.W(clsOrd);       // class: atom
+		if (title && title[0]) b.Str(title);
+		else b.W(0);
+		b.W(0);                         // creation data 长度
+	}
+
+	INT_PTR CALLBACK DlgProc(HWND h, UINT m, WPARAM w, LPARAM l)
+	{
+		switch (m)
+		{
+		case WM_INITDIALOG:
+		{
+			WCHAR buf[32];
+			swprintf_s(buf, 32, L"%.1f", g_defSpacing);
+			SetWindowTextW(GetDlgItem(h, IDC_SPACING), buf);
+			// 默认选中垂直坐标标注（测 X）
+			CheckDlgButton(h, IDC_DIR_VERT, BST_CHECKED);
+			CheckDlgButton(h, IDC_DIR_HORIZ, BST_UNCHECKED);
+			return TRUE;
+		}
+		case WM_COMMAND:
+			switch (LOWORD(w))
+			{
+			case IDOK:
+			{
+				// 读方向单选：勾了"水平"则测 Y，否则测 X
+				g_result.measureX =
+					(IsDlgButtonChecked(h, IDC_DIR_HORIZ) != BST_CHECKED);
+				WCHAR t[32];
+				GetWindowTextW(GetDlgItem(h, IDC_SPACING), t, 32);
+				const double v = _wtof(t);
+				if (v < kSpacingMin || v > kSpacingMax)
+				{
+					MessageBoxW(h, L"排列间隔必须是 0.5~200 的数值（mm）",
+						L"坐标标注参数", MB_ICONWARNING | MB_OK);
+					return TRUE;
+				}
+				g_result.spacing = v;
+				EndDialog(h, 1);
+				return TRUE;
+			}
+			case IDCANCEL:
+				EndDialog(h, 0);
+				return TRUE;
+			}
+			break;
+		case WM_CLOSE:
+			EndDialog(h, 0);
+			return TRUE;
+		}
+		return FALSE;
+	}
+
+	// 返回 true=用户确定，结果写入 out
+	bool Show(double defSpacing, Result& out)
+	{
+		g_defSpacing = defSpacing;
+
+		Buf b;
+		// DLGTEMPLATE
+		b.DW(WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME);
+		b.DW(0);
+		b.W(6);   // 控件总数：方向单选x2 + 标签 + 编辑框 + 确定/取消
+		b.W(0); b.W(0); b.W(260); b.W(82);
+		b.W(0);                         // 无菜单
+		b.W(0);                         // 默认类
+		b.Str(L"坐标标注参数设置");
+
+		// 方向单选按钮组（BS_AUTORADIOBUTTON 自动互斥；首个带 WS_GROUP 划定分组）
+		AddItem(b, WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_GROUP | BS_AUTORADIOBUTTON,
+			8, 8, 200, 10, IDC_DIR_VERT, 0x0080, L"垂直坐标标注（测 X 坐标，左侧竖排）");
+		AddItem(b, WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON,
+			8, 22, 200, 10, IDC_DIR_HORIZ, 0x0080, L"水平坐标标注（测 Y 坐标，下方横排）");
+
+		// 排列间隔
+		AddItem(b, WS_CHILD | WS_VISIBLE | SS_LEFT,
+			8, 40, 92, 10, 9000, 0x0082, L"排列间隔 (mm):");
+		AddItem(b, WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
+			104, 38, 60, 12, IDC_SPACING, 0x0081, L"");
+
+		// 确定/取消
+		AddItem(b, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+			56, 58, 40, 14, IDOK, 0x0080, L"确定");
+		AddItem(b, WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+			106, 58, 40, 14, IDCANCEL, 0x0080, L"取消");
+
+		HWND parent = GetActiveWindow();
+		INT_PTR r = DialogBoxIndirectW(NULL, (LPCDLGTEMPLATEW)(void*)b.d, parent, DlgProc);
+		if (r == 1) { out = g_result; return true; }
+		return false;
+	}
+} // namespace OrdDlg
+
+//==============================================================================
+// phase_pick_ordinate_dims —— 交互式坐标标注（v2 主流程）
+// 流程：幂等警示 → 光标视图切 0 → 多选投影线段 → 取每条线段两端点并去重
+//       → UF_UI_point_construct（推断点，带捕捉）拾取原点 → 视图曲线中吸附
+//       最近特征点作基准 → 对话框（方向/间隔）→ 端点按坐标值升序排序 →
+//       录制 VB 同款链式逐条 Commit（首条产基准标注 + 链式 margin）。
+//==============================================================================
+void phase_pick_ordinate_dims(NXOpen::Part* part,
+	NXOpen::Drawings::DraftingView* sectionView)
 {
 	if (!sectionView)
 	{
-		CommonUtils::print_msg("[Step3] 轮廓坐标标注已跳过（无剖视图）");
-		return;
-	}
-	if (!centerlineObj)
-	{
-		CommonUtils::print_msg("[Step3] 轮廓坐标标注已跳过（中心线不可用，无法作为坐标基准）");
+		CommonUtils::print_msg("[Step3] 坐标标注已跳过（无剖视图）");
 		return;
 	}
 
 	char fmt[512];
 
-	// ---- 幂等保护（任务#24）：重复运行会使 UF_DRAW_ask_view_borders 把已有
-	// 坐标标注计入视图边界，导致边界/放置位置逐级膨胀。检测到当前剖视图上
-	// 已存在坐标标注（type=26 且 subtype 为 13/14/18，见 uf_object_types.h）则
-	// 跳过创建；其它图纸/视图上的坐标标注不计入（避免跨图纸误拦）。
-	// 关联信息不可得（GetAssociativeOrigin 抛异常）的标注不据此拦截。
+	// ---- 幂等警示（v2 不再拦截）：本视图已有坐标标注时打印数量告警 ----
+	// 背景（任务#24）：重复运行会使 UF_DRAW_ask_view_borders 把已有坐标标注
+	// 计入视图边界导致边界膨胀；交互模式用户有意追加标注（分批次补标），
+	// 因此只告警不跳过。关联信息不可得（GetAssociativeOrigin 抛异常）的
+	// 标注不计数。
 	{
 		int existOrd = 0, unlinked = 0;
 		for (NXOpen::Annotations::DimensionCollection::iterator dit = part->Dimensions()->begin();
@@ -88,685 +258,588 @@ void phase_auto_contour_dims(NXOpen::Part* part,
 				onView = (od.View && od.View->Tag() == sectionView->Tag()) ||
 				         (od.ViewOfGeometry && od.ViewOfGeometry->Tag() == sectionView->Tag());
 			}
-			catch (...) { ++unlinked; }   // 关联信息不可得：不据此拦截
+			catch (...) { ++unlinked; }
 			if (onView) ++existOrd;
 		}
 		if (existOrd > 0)
 		{
 			sprintf_s(fmt, sizeof(fmt),
-				"[Step3] 当前剖视图已存在坐标标注 %d 条，跳过创建（幂等保护；无法确认归属 %d 条不拦截）",
+				"[Step3] 提示: 当前剖视图已有坐标标注 %d 条，本次将追加（重复标注请自查；%d 条归属不明）",
 				existOrd, unlinked);
 			CommonUtils::print_msg(fmt);
-			return;
 		}
 	}
 
-	// ---- 视图边界（图纸坐标 [Xmin,Ymin,Xmax,Ymax]）与 margin 位置 ----
+	// ---- 1. 多选投影线段（视图相关几何，须切"任意视图"） ----
+	int oldCursorView = 1;
+	UF_UI_ask_cursor_view(&oldCursorView);
+	UF_UI_set_cursor_view(0);
+
+	std::vector<NXOpen::TaggedObject*> picked;
+	NXOpen::Selection::Response rsp =
+		CommonUtils::get_ui()->SelectionManager()->SelectTaggedObjects(
+			"选择投影轮廓线段（可多选，确定/MB2 结束）", "Step3 坐标标注",
+			NXOpen::Selection::SelectionScopeWorkPart, false, true, picked);
+
+	UF_UI_set_cursor_view(oldCursorView);
+
+	if (rsp != NXOpen::Selection::ResponseOk &&
+		rsp != NXOpen::Selection::ResponseObjectSelected &&
+		rsp != NXOpen::Selection::ResponseBack)
+	{
+		CommonUtils::print_msg("[Step3] 已跳过坐标标注（未选择线段）");
+		return;
+	}
+
+	// ---- 2. 取每条选中线段两端点（parm=0/1），0.01 容差去重 ----
+	struct EndPt
+	{
+		NXOpen::DisplayableObject* disp;
+		NXOpen::Point3d pt;
+		NXOpen::InferSnapType::SnapType snap;
+		int hostType;      // UF type（去重时优先保留制图曲线）
+		int hostSubtype;
+	};
+	std::vector<EndPt> endPts;
+	int segCount = 0, propFail = 0, dupMerged = 0;
+	for (size_t i = 0; i < picked.size(); ++i)
+	{
+		NXOpen::DisplayableObject* disp =
+			dynamic_cast<NXOpen::DisplayableObject*>(picked[i]);
+		if (!disp)
+		{
+			sprintf_s(fmt, sizeof(fmt),
+				"  警告: 所选对象 #%d 非显示对象，已跳过", (int)i);
+			CommonUtils::print_msg(fmt);
+			continue;
+		}
+		++segCount;
+		int t = 0, s = 0;
+		UF_OBJ_ask_type_and_subtype(disp->Tag(), &t, &s);
+
+		double pt0[3] = { 0,0,0 }, pt1[3] = { 0,0,0 };
+		bool ok0 = false, ok1 = false;
+		for (int e = 0; e < 2; ++e)
+		{
+			double pt[3], tg[3], pn[3], bn[3], torsion = 0.0, roc = 0.0;
+			const double parm = (e == 0) ? 0.0 : 1.0;
+			if (UF_MODL_ask_curve_props(disp->Tag(), parm, pt, tg, pn, bn, &torsion, &roc) != 0)
+			{
+				++propFail;
+				continue;
+			}
+			if (e == 0) { memcpy(pt0, pt, sizeof(pt0)); ok0 = true; }
+			else        { memcpy(pt1, pt, sizeof(pt1)); ok1 = true; }
+		}
+		// 封闭曲线（整圆等）：parm=0 与 parm=1 是同一点，只标注一次
+		if (ok0 && ok1)
+		{
+			const double dx = pt0[0] - pt1[0], dy = pt0[1] - pt1[1];
+			if (dx * dx + dy * dy < kDupTol * kDupTol) ok1 = false;
+		}
+		for (int e = 0; e < 2; ++e)
+		{
+			if (e == 0 && !ok0) continue;
+			if (e == 1 && !ok1) continue;
+			const double* p = (e == 0) ? pt0 : pt1;
+			int dupIdx = -1;
+			for (size_t k = 0; k < endPts.size(); ++k)
+			{
+				const double dx = endPts[k].pt.X - p[0];
+				const double dy = endPts[k].pt.Y - p[1];
+				if (dx * dx + dy * dy < kDupTol * kDupTol) { dupIdx = (int)k; break; }
+			}
+			if (dupIdx >= 0)
+			{
+				// 同一几何位置若先收录了实体边、后遇到制图曲线，则换成制图曲线
+				//（坐标标注的被测关联对象在录制 VB 中全部是 DraftingCurve）
+				const bool oldSolid = (endPts[dupIdx].hostType == UF_solid_type &&
+					endPts[dupIdx].hostSubtype == UF_solid_edge_subtype);
+				const bool newSolid = (t == UF_solid_type && s == UF_solid_edge_subtype);
+				if (oldSolid && !newSolid)
+				{
+					endPts[dupIdx].disp = disp;
+					endPts[dupIdx].hostType = t;
+					endPts[dupIdx].hostSubtype = s;
+					endPts[dupIdx].snap = (e == 0) ? NXOpen::InferSnapType::SnapTypeStart
+						: NXOpen::InferSnapType::SnapTypeEnd;
+				}
+				++dupMerged;
+				continue;
+			}
+			EndPt ep;
+			ep.disp = disp;
+			ep.pt = NXOpen::Point3d(p[0], p[1], p[2]);
+			ep.snap = (e == 0) ? NXOpen::InferSnapType::SnapTypeStart
+				: NXOpen::InferSnapType::SnapTypeEnd;
+			ep.hostType = t;
+			ep.hostSubtype = s;
+			endPts.push_back(ep);
+		}
+	}
+	sprintf_s(fmt, sizeof(fmt),
+		"[Step3] 已选择线段 %d 条，端点去重后 %d 个（合并 %d 次，属性读取失败 %d 次）",
+		segCount, (int)endPts.size(), dupMerged, propFail);
+	CommonUtils::print_msg(fmt);
+	if (endPts.empty())
+	{
+		CommonUtils::print_msg("[Step3] 已跳过坐标标注（所选线段未取到有效端点）");
+		return;
+	}
+
+	// ---- 3. 带捕捉点选坐标原点（UF_UI_point_construct 推断点模式） ----
+	// 推断点模式可捕捉曲线端点/中点/圆心等；生成的临时关联点随后删除。
+	// 注意：NXOpen::Point 继承 SmartObject 而非 DisplayableObject，不能直接
+	// 作 OrdinateOrigin 的关联对象，故只用其坐标到视图曲线中吸附特征点。
+	char cue[128] = "拾取坐标原点（捕捉端点/中点/圆心，MB1 确定）";
+	UF_UI_POINT_base_method_t method = UF_UI_POINT_INFERRED;
+	tag_t ptTag = NULL_TAG;
+	double originPt[3] = { 0.0, 0.0, 0.0 };
+	int resp = UF_UI_CANCEL;
+	int rc = UF_UI_point_construct(cue, &method, &ptTag, originPt, &resp);
+	if (rc != 0 || resp != UF_UI_OK || ptTag == NULL_TAG)
+	{
+		CommonUtils::print_msg("[Step3] 已跳过坐标标注（未拾取坐标原点）");
+		return;
+	}
+	sprintf_s(fmt, sizeof(fmt),
+		"[Step3] 原点拾取: 坐标=(%.3f, %.3f, %.3f)，捕捉方法=%d",
+		originPt[0], originPt[1], originPt[2], (int)method);
+	CommonUtils::print_msg(fmt);
+	// 删除临时关联点（不可见；删除失败仅告警，不影响标注）
+	if (UF_OBJ_delete_object(ptTag) != 0)
+	{
+		sprintf_s(fmt, sizeof(fmt),
+			"  警告: 原点临时关联点 tag=%llu 删除失败（点不可见，无影响）",
+			(unsigned long long)ptTag);
+		CommonUtils::print_msg(fmt);
+	}
+
+	// ---- 4. 在视图曲线中吸附原点特征点（最近端点/中点/圆心，容差 kOriginTol） ----
+	const std::vector<CommonUtils::CurveInfo> curves =
+		CommonUtils::enumerate_view_curves(sectionView);
+
+	NXOpen::DisplayableObject* originCurve = NULL;
+	NXOpen::Point3d originFeaturePt(0.0, 0.0, 0.0);
+	NXOpen::InferSnapType::SnapType originSnap = NXOpen::InferSnapType::SnapTypeMid;
+	double bestDist = kOriginTol;
+	for (size_t i = 0; i < curves.size(); ++i)
+	{
+		const CommonUtils::CurveInfo& ci = curves[i];
+		if (!ci.has_props) continue;
+		struct Feat { const double* p; NXOpen::InferSnapType::SnapType snap; };
+		const double midPt[3] = {
+			(ci.start_pt[0] + ci.end_pt[0]) / 2.0,
+			(ci.start_pt[1] + ci.end_pt[1]) / 2.0,
+			(ci.start_pt[2] + ci.end_pt[2]) / 2.0 };
+		Feat feats[4] = {
+			{ ci.start_pt,   NXOpen::InferSnapType::SnapTypeStart  },
+			{ ci.end_pt,     NXOpen::InferSnapType::SnapTypeEnd    },
+			{ midPt,         NXOpen::InferSnapType::SnapTypeMid    },
+			{ ci.arc_center, NXOpen::InferSnapType::SnapTypeCenter }   // 仅圆/圆弧有效
+		};
+		const int nFeat = (ci.type == UF_circle_type) ? 4 : 3;
+		for (int f = 0; f < nFeat; ++f)
+		{
+			const double dx = feats[f].p[0] - originPt[0];
+			const double dy = feats[f].p[1] - originPt[1];
+			const double d = sqrt(dx * dx + dy * dy);
+			if (d < bestDist)
+			{
+				NXOpen::DisplayableObject* disp = dynamic_cast<NXOpen::DisplayableObject*>(
+					NXOpen::NXObjectManager::Get(ci.tag));
+				if (!disp) continue;   // 非显示对象不作基准宿主
+				bestDist = d;
+				originCurve = disp;
+				originFeaturePt = NXOpen::Point3d(feats[f].p[0], feats[f].p[1], feats[f].p[2]);
+				originSnap = feats[f].snap;
+			}
+		}
+	}
+	if (!originCurve)
+	{
+		sprintf_s(fmt, sizeof(fmt),
+			"[Step3] 已跳过坐标标注（原点未捕捉到剖视图内几何: 拾取点距最近曲线特征点 %.3f mm，容差 %.2f mm）",
+			bestDist, kOriginTol);
+		CommonUtils::print_msg(fmt);
+		return;
+	}
+	{
+		int ot = 0, os = 0;
+		UF_OBJ_ask_type_and_subtype(originCurve->Tag(), &ot, &os);
+		const char* snapName = "Mid";
+		if (originSnap == NXOpen::InferSnapType::SnapTypeStart) snapName = "Start";
+		else if (originSnap == NXOpen::InferSnapType::SnapTypeEnd) snapName = "End";
+		else if (originSnap == NXOpen::InferSnapType::SnapTypeCenter) snapName = "Center";
+		sprintf_s(fmt, sizeof(fmt),
+			"[Step3] 原点已吸附: 曲线 tag=%llu type=%d subtype=%d snap=%s 特征点=(%.3f, %.3f) 距离=%.4f mm",
+			(unsigned long long)originCurve->Tag(), ot, os, snapName,
+			originFeaturePt.X, originFeaturePt.Y, bestDist);
+		CommonUtils::print_msg(fmt);
+	}
+
+	// ---- 5. 对话框：测量方向 + 排列间隔 ----
+	OrdDlg::Result res;
+	if (!OrdDlg::Show(kDefaultSpacing, res))
+	{
+		CommonUtils::print_msg("[Step3] 已跳过坐标标注（用户取消对话框）");
+		return;
+	}
+	const bool measureX = res.measureX;   // true=测 X（垂直坐标标注）；false=测 Y（水平坐标标注）
+	const double spacing = res.spacing;
+
+	// ---- 6. 过滤被测端点并按坐标值升序排序 ----
+	// 任务#17 教训：被测点不能落在基准曲线自身上（NX 会推断出零长度尺寸）；
+	// 与原点重合的点也不标注。
+	std::vector<EndPt> meas;
+	for (size_t i = 0; i < endPts.size(); ++i)
+	{
+		if (endPts[i].disp == originCurve) continue;
+		const double dx = endPts[i].pt.X - originFeaturePt.X;
+		const double dy = endPts[i].pt.Y - originFeaturePt.Y;
+		if (dx * dx + dy * dy < kOriginTol * kOriginTol) continue;
+		meas.push_back(endPts[i]);
+	}
+	if (meas.empty())
+	{
+		CommonUtils::print_msg("[Step3] 已跳过坐标标注（除基准曲线外无可用被测端点）");
+		return;
+	}
+	std::stable_sort(meas.begin(), meas.end(), [&](const EndPt& a, const EndPt& b) {
+		if (measureX) return a.pt.X < b.pt.X;
+		return a.pt.Y < b.pt.Y;
+	});
+	{
+		const char* dirName = measureX ? "X" : "Y";
+		sprintf_s(fmt, sizeof(fmt),
+			"[Step3] 测量方向=%s ，被测端点 %d 个（按坐标值升序）:",
+			dirName, (int)meas.size());
+		CommonUtils::print_msg(fmt);
+		for (size_t i = 0; i < meas.size(); ++i)
+		{
+			sprintf_s(fmt, sizeof(fmt),
+				"    #%d (X=%.3f, Y=%.3f) snap=%s 承载tag=%llu",
+				(int)i, meas[i].pt.X, meas[i].pt.Y,
+				(meas[i].snap == NXOpen::InferSnapType::SnapTypeEnd) ? "End" : "Start",
+				(unsigned long long)meas[i].disp->Tag());
+			CommonUtils::print_msg(fmt);
+		}
+	}
+
+	// ---- 7. 视图边界与 margin / 放置位置（图纸坐标） ----
 	double b[4] = { 0.0, 0.0, 0.0, 0.0 };
 	int rcB = UF_DRAW_ask_view_borders(sectionView->Tag(), b);
 	bool borderOk = (rcB == 0);
 	NXOpen::Point3d hMargin(0.0, 0.0, 0.0);   // 水平组 margin：Y = 视图下缘-12
 	NXOpen::Point3d vMargin(0.0, 0.0, 0.0);   // 垂直组 margin：X = 视图左缘-12
-	if (rcB == 0)
+	if (borderOk)
 	{
 		hMargin = NXOpen::Point3d((b[0] + b[2]) / 2.0, b[1] - 12.0, 0.0);
 		vMargin = NXOpen::Point3d(b[0] - 12.0, (b[1] + b[3]) / 2.0, 0.0);
 	}
 	else
 	{
-		// 边界读取失败：降级用 0 坐标作 margin 位置（Commit 时 NX 自行推断）
 		sprintf_s(fmt, sizeof(fmt),
-			"  警告: UF_DRAW_ask_view_borders 返回 %d，坐标标注 margin 位置降级为默认", rcB);
+			"  警告: UF_DRAW_ask_view_borders 返回 %d ，margin 位置降级为默认", rcB);
 		CommonUtils::print_msg(fmt);
 	}
-
-	// ---- 多策略枚举视图内曲线/边（含诊断日志） ----
-	// CommonUtils::enumerate_view_curves 内部已含 silent_update + view->Update，
-	// 依次尝试：A=UF_VIEW_cycle_objects / B=DraftingBody DraftingCurves /
-	// C=UF_DRAW 截面边 API，按 tag 去重合并（截面边是视图 DraftingBody
-	// 所属 DraftingCurve，策略A 遍历不到，主要依赖 B/C）
-	const std::vector<CommonUtils::CurveInfo> curves =
-		CommonUtils::enumerate_view_curves(sectionView);
-
-	// ---- 诊断：中心线与首几条曲线的对象形态 ----
-	// 背景：上一轮实测 Builder 报 "The first object associativity type is
-	// invalid."（单条降级模式），需确认 OrdinateOrigin（第一关联对象）
-	// 与 AutoAssociativities 传入对象的 UF 类型是否合法。
-	// 录制 VB 参考：OrdinateOrigin 用的是截面边 DraftingCurve（而非中心线）。
+	// 显式放置原点（任务#24，图纸坐标，仿 VB L1527/L1817）：
+	// 测X（垂直坐标标注）：首条在视图内近左缘，标签沿 Y 步进（间隔=用户输入）；
+	// 测Y（水平坐标标注）：首条在视图内近下缘，标签沿 X 步进。
+	NXOpen::Point3d firstOrigin(0.0, 0.0, 0.0);
+	NXOpen::Point3d originStep(0.0, 0.0, 0.0);
+	bool explicitOrigin = false;
+	if (borderOk)
 	{
-		int clType = 0, clSub = 0;
-		UF_OBJ_ask_type_and_subtype(centerlineObj->Tag(), &clType, &clSub);
-		std::string clJid;
-		try { clJid = centerlineObj->JournalIdentifier().GetText(); }
-		catch (...) { clJid = "<无JournalIdentifier>"; }
-		sprintf_s(fmt, sizeof(fmt),
-			"[坐标标注诊断] 中心线 tag=%llu, type=%d, subtype=%d, JournalId=%s",
-			(unsigned long long)centerlineObj->Tag(), clType, clSub, clJid.c_str());
-		CommonUtils::print_msg(fmt);
-		const int nShow = (int)curves.size() < 3 ? (int)curves.size() : 3;
-		for (int i = 0; i < nShow; ++i)
+		if (measureX)
 		{
-			sprintf_s(fmt, sizeof(fmt),
-				"  [坐标标注诊断] 曲线 #%d tag=%llu type=%d subtype=%d has_props=%d "
-				"start=(%.3f, %.3f) end=(%.3f, %.3f)",
-				i, (unsigned long long)curves[i].tag, curves[i].type, curves[i].subtype,
-				(int)curves[i].has_props,
-				curves[i].start_pt[0], curves[i].start_pt[1],
-				curves[i].end_pt[0], curves[i].end_pt[1]);
-			CommonUtils::print_msg(fmt);
-		}
-	}
-
-	// ---- 候选坐标原点（任务#17 修正）：VB 的 OrdinateOrigin 是端面截面边——
-	// 位于测量方向极值位置（最外侧端面）的近铅垂/近水平长边，基准点取其
-	// 中点（SnapTypeMid）。旧版只取"最左/最下"未考虑长度，可能选到过短的
-	// 碎边导致 NX 无法推断出 OrdinateOriginDimension。现改为：
-	// 水平组(测X) → 极值 X（交替尝试最大/最小）处最长的近铅垂曲线；
-	// 垂直组(测Y) → 极值 Y 处最长的近水平曲线；找不到则退化为最长同向曲线。
-	auto pickOriginCurve = [&](bool horizontal) -> std::pair<NXOpen::DisplayableObject*, NXOpen::Point3d>
-	{
-		// 第一轮只挑"制图曲线"（line/circle/conic/spline，即 DraftingCurve 形态，
-		// 录制 VB 的 OrdinateOrigin 就是截面边 DraftingCurve）；实体边(solid edge)
-		// 的关联类型对坐标标注不合法（实测报 "first object associativity type
-		// is invalid"），仅作第二轮兜底。
-		for (int allowSolid = 0; allowSolid < 2; ++allowSolid)
-		{
-			for (int ext = 0; ext < 2; ++ext)   // ext=0 取最大极值端，ext=1 取最小极值端
-			{
-				NXOpen::DisplayableObject* obj = NULL;
-				NXOpen::Point3d pt(0.0, 0.0, 0.0);
-				double bestKey = (ext == 0) ? -1e300 : 1e300;   // 极值坐标
-				double bestLen = -1.0;                          // 该极值曲线长度
-				for (size_t i = 0; i < curves.size(); ++i)
-				{
-					const CommonUtils::CurveInfo& ci = curves[i];
-					if (!ci.has_props) continue;
-					const bool isSolid = (ci.type == UF_solid_type &&
-						ci.subtype == UF_solid_edge_subtype);
-					if (allowSolid == 0 && isSolid) continue;   // 第一轮排除实体边
-					const double tx = fabs(ci.start_tg[0]) + fabs(ci.end_tg[0]);
-					const double ty = fabs(ci.start_tg[1]) + fabs(ci.end_tg[1]);
-					// 水平组测量 X -> 基准线近铅垂(ty>tx)；垂直组测量 Y -> 基准线近水平
-					if (horizontal ? (ty <= tx) : (tx <= ty)) continue;
-					const double key = horizontal
-						? (ci.start_pt[0] + ci.end_pt[0]) / 2.0
-						: (ci.start_pt[1] + ci.end_pt[1]) / 2.0;
-					const double dx = ci.end_pt[0] - ci.start_pt[0];
-					const double dy = ci.end_pt[1] - ci.start_pt[1];
-					const double len = sqrt(dx * dx + dy * dy);
-					if (len < 2.0) continue;   // 过短的碎边不作为基准（任务#17）
-					const bool betterKey = (ext == 0) ? (key > bestKey + 1.0)
-						                              : (key < bestKey - 1.0);
-					if (betterKey || (fabs(key - bestKey) <= 1.0 && len > bestLen))
-					{
-						if (betterKey)
-						{
-							bestKey = key;
-							bestLen = len;
-						}
-						else
-						{
-							bestLen = len;
-						}
-						obj = dynamic_cast<NXOpen::DisplayableObject*>(
-							NXOpen::NXObjectManager::Get(ci.tag));
-						pt = NXOpen::Point3d((ci.start_pt[0] + ci.end_pt[0]) / 2.0,
-							(ci.start_pt[1] + ci.end_pt[1]) / 2.0, 0.0);
-					}
-				}
-				if (obj) return std::pair<NXOpen::DisplayableObject*, NXOpen::Point3d>(obj, pt);
-			}
-		}
-		// 兜底1：无方向相符曲线时取最长制图曲线；兜底2：再取最长任意曲线
-		for (int allowSolid = 0; allowSolid < 2; ++allowSolid)
-		{
-			NXOpen::DisplayableObject* obj = NULL;
-			NXOpen::Point3d pt(0.0, 0.0, 0.0);
-			double bestLen = -1.0;
-			for (size_t i = 0; i < curves.size(); ++i)
-			{
-				const CommonUtils::CurveInfo& ci = curves[i];
-				if (!ci.has_props) continue;
-				const bool isSolid = (ci.type == UF_solid_type &&
-					ci.subtype == UF_solid_edge_subtype);
-				if (allowSolid == 0 && isSolid) continue;
-				const double dx = ci.end_pt[0] - ci.start_pt[0];
-				const double dy = ci.end_pt[1] - ci.start_pt[1];
-				const double len = sqrt(dx * dx + dy * dy);
-				if (len > bestLen)
-				{
-					bestLen = len;
-					obj = dynamic_cast<NXOpen::DisplayableObject*>(
-						NXOpen::NXObjectManager::Get(ci.tag));
-					pt = NXOpen::Point3d((ci.start_pt[0] + ci.end_pt[0]) / 2.0,
-						(ci.start_pt[1] + ci.end_pt[1]) / 2.0, 0.0);
-				}
-			}
-			if (obj) return std::pair<NXOpen::DisplayableObject*, NXOpen::Point3d>(obj, pt);
-		}
-		return std::pair<NXOpen::DisplayableObject*, NXOpen::Point3d>(NULL, NXOpen::Point3d(0.0, 0.0, 0.0));
-	};
-
-	// ---- 取端点（枚举时已求 parm=0.0/1.0），0.01 容差去重 ----
-	// EndPt 记录去重后每个端点的承载对象/坐标/snap 类型（parm=0→Start，
-	// parm=1→End，录制 VB 的 SecondAssociativities.SetValue 需显式 snap）
-	struct EndPt
-	{
-		NXOpen::DisplayableObject* disp;
-		NXOpen::Point3d pt;
-		NXOpen::InferSnapType::SnapType snap;
-	};
-	std::vector<EndPt> endPts;
-	{
-		const double kDupTol = 0.01;
-		for (size_t i = 0; i < curves.size(); ++i)
-		{
-			if (!curves[i].has_props) continue;   // 端点无效(0,0,0)者不参与
-			NXOpen::TaggedObject* tobj = NXOpen::NXObjectManager::Get(curves[i].tag);
-			NXOpen::DisplayableObject* disp =
-				dynamic_cast<NXOpen::DisplayableObject*>(tobj);
-			if (!disp) continue;
-			for (int e = 0; e < 2; ++e)
-			{
-				const double* p = (e == 0) ? curves[i].start_pt : curves[i].end_pt;
-				int dupIdx = -1;
-				for (size_t k = 0; k < endPts.size(); ++k)
-				{
-					const double dx = endPts[k].pt.X - p[0];
-					const double dy = endPts[k].pt.Y - p[1];
-					if (dx * dx + dy * dy < kDupTol * kDupTol) { dupIdx = (int)k; break; }
-				}
-				if (dupIdx >= 0)
-				{
-					// 同一几何位置若先收录了实体边、后遇到制图曲线，则换成制图曲线
-					// （坐标标注的被测关联对象在 VB 录制中全部是 DraftingCurve）
-					int oldT = 0, oldS = 0;
-					UF_OBJ_ask_type_and_subtype(endPts[dupIdx].disp->Tag(), &oldT, &oldS);
-					const bool oldSolid = (oldT == UF_solid_type && oldS == UF_solid_edge_subtype);
-					const bool newSolid = (curves[i].type == UF_solid_type &&
-						curves[i].subtype == UF_solid_edge_subtype);
-					if (oldSolid && !newSolid)
-					{
-						endPts[dupIdx].disp = disp;
-						endPts[dupIdx].snap = (e == 0) ? NXOpen::InferSnapType::SnapTypeStart
-							                       : NXOpen::InferSnapType::SnapTypeEnd;
-					}
-					continue;
-				}
-				EndPt ep;
-				ep.disp = disp;
-				ep.pt = NXOpen::Point3d(p[0], p[1], p[2]);
-				ep.snap = (e == 0) ? NXOpen::InferSnapType::SnapTypeStart
-					               : NXOpen::InferSnapType::SnapTypeEnd;
-				endPts.push_back(ep);
-			}
-		}
-	}
-	sprintf_s(fmt, sizeof(fmt),
-		"  视图成员曲线/边 %d 条，轮廓端点（去重后）%d 个",
-		(int)curves.size(), (int)endPts.size());
-	CommonUtils::print_msg(fmt);
-	if (endPts.empty())
-	{
-		CommonUtils::print_msg("[Step3] 轮廓坐标标注已跳过（未取到轮廓端点）");
-		return;
-	}
-
-	// ---- 单个 Builder（水平组或垂直组）：基准按候选顺序尝试，端点集=AutoAssociativities ----
-	// 基准候选：[0]=中心线（原方案） [1]=截面边 DraftingCurve（录制 VB 方案）；
-	// 每个基准内再按成组模式（TypesMultipleDimension）→ 单条降级模式
-	// （TypesSingleDimension）两级重试；任一组合成功即返回，全部失败记日志。
-	// 注：头文件实测 BaseOrdinateDimensionBuilder 的 OrdinateOrigin 为
-	// SelectDisplayableObject、AutoAssociativities 为 SelectDisplayableObjectList，
-	// 均支持 (DisplayableObject*, View*, Point3d) 三元重载（DraftingCurve/
-	// Edge 均继承自 DisplayableObject，可直接传入）。
-	NXOpen::DisplayableObject* clDisp = centerlineObj;
-	auto runBuilder = [&](bool horizontal) -> int
-	{
-		const char* dirName = horizontal ? "水平" : "垂直";
-		struct OriginCand
-		{
-			NXOpen::DisplayableObject* obj;
-			NXOpen::Point3d pt;
-			const char* desc;
-		};
-		const std::pair<NXOpen::DisplayableObject*, NXOpen::Point3d> fc = pickOriginCurve(horizontal);
-		OriginCand cands[2] = {
-			{ clDisp, NXOpen::Point3d(0.0, 0.0, 0.0), "中心线" },
-			{ fc.first, fc.second, "截面边曲线" }
-		};
-		int created = -1;   // -1 = 全部失败
-		for (int oi = 0; oi < 2 && created < 0; ++oi)
-		{
-			if (!cands[oi].obj) continue;
-			for (int pass = 0; pass < 2 && created < 0; ++pass)
-			{
-				NXOpen::Annotations::OrdinateDimensionBuilder* obBuilder = NULL;
-				try
-				{
-					obBuilder = part->Dimensions()->CreateOrdinateDimensionBuilder(NULL);
-					obBuilder->SetType(pass == 0
-						? NXOpen::Annotations::BaseOrdinateDimensionBuilder::TypesMultipleDimension
-						: NXOpen::Annotations::BaseOrdinateDimensionBuilder::TypesSingleDimension);
-					// 基准：SetValue(对象, 视图, 基准点)；VB 参考传曲线中点
-					obBuilder->OrdinateOrigin()->SetValue(cands[oi].obj, sectionView,
-						cands[oi].pt);
-					// 端点集：曲线/边 NXObject + 所在视图 + 端点坐标
-					for (size_t i = 0; i < curves.size(); ++i)
-					{
-						NXOpen::TaggedObject* tobj = NXOpen::NXObjectManager::Get(curves[i].tag);
-						NXOpen::DisplayableObject* disp =
-							dynamic_cast<NXOpen::DisplayableObject*>(tobj);
-						if (!disp) continue;
-						double pt[3], tg[3], pn[3], bn[3], torsion = 0.0, roc = 0.0;
-						for (double parm = 0.0; parm <= 1.0 + 1e-9; parm += 1.0)
-						{
-							if (UF_MODL_ask_curve_props(curves[i].tag, parm, pt, tg, pn, bn, &torsion, &roc) != 0)
-								continue;
-							NXOpen::Point3d q(pt[0], pt[1], pt[2]);
-							bool dup = false;
-							for (size_t k = 0; k < endPts.size(); ++k)
-							{
-								const double dx = endPts[k].pt.X - q.X, dy = endPts[k].pt.Y - q.Y;
-								if (dx * dx + dy * dy < 0.01 * 0.01) { dup = true; break; }
-							}
-							if (!dup) continue;   // 该端点已被去重丢弃，不重复 Add
-							obBuilder->AutoAssociativities()->Add(disp, sectionView, q);
-						}
-					}
-					// Commit 前诊断：基准对象与关联对象数量
-					sprintf_s(fmt, sizeof(fmt),
-						"[坐标标注诊断] %s组 基准=%s 模式=%s 关联对象 %d 个，准备 Commit",
-						dirName, cands[oi].desc, (pass == 0 ? "成组" : "单条"),
-						obBuilder->AutoAssociativities()->Size());
-					CommonUtils::print_msg(fmt);
-					// 放置方位（margin）决定标注方向
-					if (horizontal) obBuilder->SetHorizontalInferredMarginLocation(hMargin);
-					else            obBuilder->SetVerticalInferredMarginLocation(vMargin);
-					obBuilder->Origin()->AnnotationView()->SetValue(sectionView);
-					obBuilder->Commit();
-					obBuilder->Destroy();
-					obBuilder = NULL;
-					created = (pass == 0) ? (int)endPts.size() : 1;
-				}
-				catch (const NXOpen::NXException& e)
-				{
-					if (obBuilder) { obBuilder->Destroy(); obBuilder = NULL; }
-					sprintf_s(fmt, sizeof(fmt), "  警告: %s坐标标注 基准=%s %s模式失败: %s",
-						dirName, cands[oi].desc, (pass == 0 ? "成组" : "单条降级"),
-						e.Message());
-					CommonUtils::print_msg(fmt);
-				}
-				catch (...)
-				{
-					if (obBuilder) { obBuilder->Destroy(); obBuilder = NULL; }
-					CommonUtils::print_msg(string("  警告: ") + dirName + "坐标标注失败（未知异常）");
-				}
-			}
-		}
-		return created;
-	};
-
-	// ---- 录制 VB 忠实逐条模式（终极降级，任务#15 根因修复 / #24 放置控制） ----
-	// 录制宏 000R_VB.vb 成功模式（L1364/L1434/L1527/L1564/L1614/L1722/L1817）：
-	//   首条：OrdinateOrigin.SetValue(SnapTypeMid, 截面边曲线, 视图, 曲线上点,
-	//         NULL, NULL, (0,0,0)) + SecondAssociativities.SetValue(snap, 端点曲线,
-	//         视图, 端点, ...) + 显式放置原点 Origin.Origin.SetValue(Nothing,
-	//         nullView, 图纸坐标点)（L1527） → Commit 产出 OrdinateOriginDimension
-	//         （ENTITY 26 6）；Commit 后 OrdinateMargins.CreateInferredMargin
-	//         （L1564）建链式 margin。
-	//   后续：OrdinateOrigin.SetValue(基准标注) + ActiveVerticalMargin = 已建
-	//         margin（L1722）+ 显式原点逐条步进 9.0（L1817 vs L1527：X 不变 Y+9），
-	//         每条标注独立 Commit。
-	// C++ 映射（头文件证据）：
-	//   Origin.Origin.SetValue          → ob->Origin()->Origin()->SetValue(NULL, NULL, pt)
-	//                                     （Annotations_OriginBuilder.hxx L111: Origin() → SelectDisplayableObject*）
-	//   OrdinateMargins.CreateInferredMargin → part->Annotations()->OrdinateMargins()->CreateInferredMargin(...)
-	//                                     （Annotations_AnnotationManager.hxx L899、Annotations_OrdinateMarginCollection.hxx L191）
-	//   ActiveVerticalMargin = margin   → ob->SetActiveVerticalMargin(margin)
-	//                                     （Annotations_BaseOrdinateDimensionBuilder.hxx L228/L211）
-	auto runVbPattern = [&](bool horizontal) -> int
-	{
-		const char* dirName = horizontal ? "水平" : "垂直";
-		const std::pair<NXOpen::DisplayableObject*, NXOpen::Point3d> oc = pickOriginCurve(horizontal);
-		if (!oc.first)
-		{
-			CommonUtils::print_msg(string("  [Step3] ") + dirName +
-				"VB 模式降级跳过：无可用截面边基准曲线");
-			return -1;
-		}
-		// VB 中首条的被测点（SecondAssociativities）是另一条曲线的端点，
-		// 绝不在基准曲线自身上；若被测点落在基准曲线上 NX 会推断出
-		// 零长度/普通尺寸而非 OrdinateOriginDimension（任务#17 根因候选）。
-		// 故过滤掉承载对象即基准曲线的端点。
-		std::vector<const EndPt*> measPts;
-		for (size_t i = 0; i < endPts.size(); ++i)
-		{
-			if (endPts[i].disp == oc.first) continue;
-			measPts.push_back(&endPts[i]);
-		}
-		sprintf_s(fmt, sizeof(fmt),
-			"  [%sVB 模式] 基准曲线 tag=%llu 中点=(%.3f, %.3f)，可用被测端点 %d/%d 个",
-			dirName, (unsigned long long)oc.first->Tag(),
-			oc.second.X, oc.second.Y, (int)measPts.size(), (int)endPts.size());
-		CommonUtils::print_msg(fmt);
-		if (measPts.empty())
-		{
-			CommonUtils::print_msg(string("  [Step3] ") + dirName +
-				"VB 模式降级跳过：除基准曲线外无可用被测端点");
-			return -1;
-		}
-
-		// 降级扫描基准：记录 Commit 前已有 OrdinateOriginDimension 的最大 tag，
-		// 首条 Commit 后若 GetCommittedObjects 中找不到，可在 part->Dimensions()
-		// 中按 tag 增量定位新创建的基准标注。
-		tag_t maxOodTag = 0;
-		for (NXOpen::Annotations::DimensionCollection::iterator dit = part->Dimensions()->begin();
-			dit != part->Dimensions()->end(); ++dit)
-		{
-			NXOpen::Annotations::OrdinateOriginDimension* d =
-				dynamic_cast<NXOpen::Annotations::OrdinateOriginDimension*>(*dit);
-			if (d && d->Tag() > maxOodTag) maxOodTag = d->Tag();
-		}
-
-		int created = 0;
-		int failed = 0;
-		NXOpen::Annotations::OrdinateOriginDimension* originDim = NULL;
-		NXOpen::Annotations::Dimension* fallbackDim = NULL;   // 链式容错：任意 Dimension 作基准
-		NXOpen::Annotations::OrdinateMargin* activeMargin = NULL;   // VB L1722 链式 margin
-
-		// ---- 显式放置原点（任务#24，图纸坐标，仿 VB L1527/L1817）----
-		// VB 实测：首条原点(49.45, 77.66)，后续每条同 X、Y 步进 +9.0。
-		// 本实现从视图边界推导：垂直组(测X) 首条放在视图内近左缘（margin
-		// 在左缘外侧），沿 Y 步进；水平组(测Y) 首条放在视图内近下缘，沿 X
-		// 步进。边界读取失败则不显式放置（维持 NX 推断，记日志）。
-		const double kOrdStep = 9.0;   // VB 实测步进 9.0（L1817 减 L1527）
-		NXOpen::Point3d firstOrigin(0.0, 0.0, 0.0);
-		NXOpen::Point3d originStep(0.0, 0.0, 0.0);
-		bool explicitOrigin = false;
-		if (borderOk)
-		{
-			if (horizontal)   // 测 Y：margin 在视图下缘外侧，文字行沿 X 排布
-			{
-				firstOrigin = NXOpen::Point3d((b[0] + b[2]) / 2.0, b[1] + 6.0, 0.0);
-				originStep = NXOpen::Point3d(kOrdStep, 0.0, 0.0);
-			}
-			else              // 测 X：margin 在视图左缘外侧，文字行沿 Y 排布
-			{
-				firstOrigin = NXOpen::Point3d(b[0] + 6.0, (b[1] + b[3]) / 2.0, 0.0);
-				originStep = NXOpen::Point3d(0.0, kOrdStep, 0.0);
-			}
-			explicitOrigin = true;
-			sprintf_s(fmt, sizeof(fmt),
-				"  [%sVB 模式] 显式放置: 首条原点=(%.3f, %.3f) 步进=(%.1f, %.1f)（图纸坐标）",
-				dirName, firstOrigin.X, firstOrigin.Y, originStep.X, originStep.Y);
-			CommonUtils::print_msg(fmt);
+			firstOrigin = NXOpen::Point3d(b[0] + 6.0, (b[1] + b[3]) / 2.0, 0.0);
+			originStep = NXOpen::Point3d(0.0, spacing, 0.0);
 		}
 		else
 		{
-			CommonUtils::print_msg(string("  [") + dirName +
-				"VB 模式] 视图边界不可用，放置降级为 NX 推断");
+			firstOrigin = NXOpen::Point3d((b[0] + b[2]) / 2.0, b[1] + 6.0, 0.0);
+			originStep = NXOpen::Point3d(spacing, 0.0, 0.0);
 		}
-		for (size_t i = 0; i < measPts.size(); ++i)
+		explicitOrigin = true;
+		sprintf_s(fmt, sizeof(fmt),
+			"[Step3] 显式放置: 首条原点=(%.3f, %.3f) 步进=(%.1f, %.1f)（图纸坐标）",
+			firstOrigin.X, firstOrigin.Y, originStep.X, originStep.Y);
+		CommonUtils::print_msg(fmt);
+	}
+
+	// ---- 8. 录制 VB 忠实逐条链式生成（单方向） ----
+	// 录制宏 000R_VB.vb 成功模式（L1364/L1434/L1527/L1564/L1614/L1722/L1817）：
+	//   首条：OrdinateOrigin.SetValue(SnapType, 基准曲线, 视图, 特征点, NULL, NULL,
+	//         (0,0,0)) + SecondAssociativities.SetValue(snap, 端点曲线, 视图, 端点,
+	//         ...) + 显式放置原点 → Commit 产出 OrdinateOriginDimension（ENTITY 26 6）；
+	//   Commit 后 OrdinateMargins.CreateInferredMargin 建链式 margin，再
+	//   SetAssociativity(3) 关联回首条标注；
+	//   后续：OrdinateOrigin.SetValue(基准标注) + Active*Margin = 已建 margin +
+	//   显式原点按间隔步进，每条标注独立 Commit。
+	const char* dirName = measureX ? "测X(垂直)" : "测Y(水平)";
+	const int marginSubtype = measureX
+		? UF_dim_ordinate_vert_subtype   // 14：垂直坐标标注（测 X）
+		: UF_dim_ordinate_horiz_subtype; // 13：水平坐标标注（测 Y）
+	const NXOpen::Point3d& marginPt = measureX ? vMargin : hMargin;
+
+	// 降级扫描基准：记录 Commit 前已有 OrdinateOriginDimension 的最大 tag，
+	// 首条 Commit 后若 GetCommittedObjects 中找不到，可在 part->Dimensions()
+	// 中按 tag 增量定位新创建的基准标注。
+	tag_t maxOodTag = 0;
+	for (NXOpen::Annotations::DimensionCollection::iterator dit = part->Dimensions()->begin();
+		dit != part->Dimensions()->end(); ++dit)
+	{
+		NXOpen::Annotations::OrdinateOriginDimension* d =
+			dynamic_cast<NXOpen::Annotations::OrdinateOriginDimension*>(*dit);
+		if (d && d->Tag() > maxOodTag) maxOodTag = d->Tag();
+	}
+
+	int created = 0;
+	int failed = 0;
+	NXOpen::Annotations::OrdinateOriginDimension* originDim = NULL;
+	NXOpen::Annotations::Dimension* fallbackDim = NULL;   // 链式容错：任意 Dimension 作基准
+	NXOpen::Annotations::OrdinateMargin* activeMargin = NULL;
+
+	for (size_t i = 0; i < meas.size(); ++i)
+	{
+		NXOpen::Annotations::OrdinateDimensionBuilder* ob = NULL;
+		try
 		{
-			NXOpen::Annotations::OrdinateDimensionBuilder* ob = NULL;
-			try
+			ob = part->Dimensions()->CreateOrdinateDimensionBuilder(NULL);
+			// ---- VB 忠实初始化（000R_VB.vb L1210/L1214/L1230/L1632/L1636/L1650）----
+			ob->Baseline()->SetActivateBaseline(true);
+			ob->Origin()->SetAnchor(NXOpen::Annotations::OriginBuilder::AlignmentPositionMidCenter);
+			ob->Origin()->Plane()->SetPlaneMethod(
+				NXOpen::Annotations::PlaneBuilder::PlaneMethodTypeXyPlane);
+			ob->Origin()->SetInferRelativeToGeometry(false);
+			ob->Style()->DimensionStyle()->SetTextCentered(false);
+			if (i == 0)
 			{
-				ob = part->Dimensions()->CreateOrdinateDimensionBuilder(NULL);
-				// ---- VB 忠实初始化（000R_VB.vb L1210/L1214/L1230/L1632/L1636/L1650）----
-				ob->Baseline()->SetActivateBaseline(true);
-				ob->Origin()->SetAnchor(NXOpen::Annotations::OriginBuilder::AlignmentPositionMidCenter);
-				ob->Origin()->Plane()->SetPlaneMethod(
-					NXOpen::Annotations::PlaneBuilder::PlaneMethodTypeXyPlane);
-				ob->Origin()->SetInferRelativeToGeometry(false);
-				ob->Style()->DimensionStyle()->SetTextCentered(false);
-				if (i == 0)
-				{
-					// 基准 = 端面截面边 DraftingCurve（VB L1364 同款 7 参 SetValue）
-					ob->OrdinateOrigin()->SetValue(NXOpen::InferSnapType::SnapTypeMid,
-						oc.first, sectionView, oc.second,
-						NULL, NULL, NXOpen::Point3d(0.0, 0.0, 0.0));
-				}
-				else
-				{
-					if (originDim)         ob->OrdinateOrigin()->SetValue(originDim);     // VB L1614
-					else if (fallbackDim)  ob->OrdinateOrigin()->SetValue(fallbackDim);   // 容错：普通 Dimension
-					else break;   // 基准标注缺失则无法继续继承
-					// VB L1722：后续标注继承首条 Commit 后创建的链式 margin
-					if (activeMargin)
-					{
-						if (horizontal) ob->SetActiveHorizontalMargin(activeMargin);
-						else            ob->SetActiveVerticalMargin(activeMargin);
-					}
-				}
-				// 被测点：SecondAssociativities（每 Builder 仅 1 个，VB L1434/L1764）
-				ob->SecondAssociativities()->SetValue(measPts[i]->snap,
-					measPts[i]->disp, sectionView, measPts[i]->pt,
+				// 基准 = 原点吸附的曲线特征点（VB L1364 同款 7 参 SetValue）
+				ob->OrdinateOrigin()->SetValue(originSnap,
+					originCurve, sectionView, originFeaturePt,
 					NULL, NULL, NXOpen::Point3d(0.0, 0.0, 0.0));
-				if (horizontal) ob->SetHorizontalInferredMarginLocation(hMargin);
-				else            ob->SetVerticalInferredMarginLocation(vMargin);
-				// VB L1534：LeaderOrientation = Left
-				ob->Style()->LineArrowStyle()->SetLeaderOrientation(
-					NXOpen::Annotations::LeaderSideLeft);
-				ob->Origin()->AnnotationView()->SetValue(sectionView);
-				// ---- 显式放置原点（VB L1506-1529 / L1796-1817）----
-				// 关键：先 SetAssociativeOrigin(Drag)（OriginType=Drag、其余字段全空），
-				// 再 Origin.Origin.SetValue(NULL, NULL, pt)，否则显式原点不生效；
-				// 该调用序列在录制宏中每个标注（含线性/直径）都有。
-				if (explicitOrigin)
+			}
+			else
+			{
+				if (originDim)         ob->OrdinateOrigin()->SetValue(originDim);     // VB L1614
+				else if (fallbackDim)  ob->OrdinateOrigin()->SetValue(fallbackDim);   // 容错：普通 Dimension
+				else break;   // 基准标注缺失则无法继续继承
+				// VB L1722：后续标注继承首条 Commit 后创建的链式 margin
+				if (activeMargin)
 				{
-					const NXOpen::Point3d placePt(
-						firstOrigin.X + originStep.X * (double)i,
-						firstOrigin.Y + originStep.Y * (double)i,
-						0.0);
-					NXOpen::Annotations::Annotation::AssociativeOriginData ao;   // 默认构造全空
-					ao.OriginType = NXOpen::Annotations::AssociativeOriginTypeDrag;
-					ob->Origin()->SetAssociativeOrigin(ao);
-					ob->Origin()->Origin()->SetValue(NULL, NULL, placePt);
-					ob->Origin()->SetInferRelativeToGeometry(false);   // VB L1212/L1529
+					if (measureX) ob->SetActiveVerticalMargin(activeMargin);
+					else          ob->SetActiveHorizontalMargin(activeMargin);
 				}
-				// VB L1552-1553：Commit 返回值即首条坐标标注（Vertical/HorizontalOrdinateDimension）
-				NXOpen::NXObject* commitObj = NULL;
-				if (i == 0) commitObj = ob->Commit();
-				else        ob->Commit();
-				if (i == 0)
+			}
+			// 被测点：SecondAssociativities（每 Builder 仅 1 个，VB L1434/L1764）
+			ob->SecondAssociativities()->SetValue(meas[i].snap,
+				meas[i].disp, sectionView, meas[i].pt,
+				NULL, NULL, NXOpen::Point3d(0.0, 0.0, 0.0));
+			if (measureX) ob->SetVerticalInferredMarginLocation(vMargin);
+			else          ob->SetHorizontalInferredMarginLocation(hMargin);
+			// VB L1534：LeaderOrientation = Left
+			ob->Style()->LineArrowStyle()->SetLeaderOrientation(
+				NXOpen::Annotations::LeaderSideLeft);
+			ob->Origin()->AnnotationView()->SetValue(sectionView);
+			// ---- 显式放置原点（VB L1506-1529 / L1796-1817）----
+			// 关键：先 SetAssociativeOrigin(Drag)（OriginType=Drag、其余字段全空），
+			// 再 Origin.Origin.SetValue(NULL, NULL, pt)，否则显式原点不生效。
+			if (explicitOrigin)
+			{
+				const NXOpen::Point3d placePt(
+					firstOrigin.X + originStep.X * (double)i,
+					firstOrigin.Y + originStep.Y * (double)i,
+					0.0);
+				NXOpen::Annotations::Annotation::AssociativeOriginData ao;   // 默认构造全空
+				ao.OriginType = NXOpen::Annotations::AssociativeOriginTypeDrag;
+				ob->Origin()->SetAssociativeOrigin(ao);
+				ob->Origin()->Origin()->SetValue(NULL, NULL, placePt);
+				ob->Origin()->SetInferRelativeToGeometry(false);   // VB L1212/L1529
+			}
+			// VB L1552-1553：Commit 返回值即首条坐标标注
+			NXOpen::NXObject* commitObj = NULL;
+			if (i == 0) commitObj = ob->Commit();
+			else        ob->Commit();
+			if (i == 0)
+			{
+				// 诊断：打印首条 Commit 全部产物的 UF 类型与类名，
+				// 定位 NX 实际推断出的标注类型（任务#17）
+				std::vector<NXOpen::NXObject*> objs = ob->GetCommittedObjects();
+				sprintf_s(fmt, sizeof(fmt),
+					"[%sVB 诊断] 首条 Commit 产物 %d 个:",
+					dirName, (int)objs.size());
+				CommonUtils::print_msg(fmt);
+				for (size_t k = 0; k < objs.size(); ++k)
 				{
-					// 诊断：打印首条 Commit 全部产物的 UF 类型与类名，
-					// 定位 NX 实际推断出的标注类型（任务#17）
-					std::vector<NXOpen::NXObject*> objs = ob->GetCommittedObjects();
+					NXOpen::NXObject* o = objs[k];
+					if (!o) continue;
+					int t = 0, s = 0;
+					UF_OBJ_ask_type_and_subtype(o->Tag(), &t, &s);
+					const char* cls = "未知类型";
+					NXOpen::Annotations::OrdinateOriginDimension* ood =
+						dynamic_cast<NXOpen::Annotations::OrdinateOriginDimension*>(o);
+					if (ood) cls = "OrdinateOriginDimension";
+					else if (dynamic_cast<NXOpen::Annotations::Dimension*>(o))
+						cls = "Dimension(其它子类)";
 					sprintf_s(fmt, sizeof(fmt),
-						"  [%sVB 诊断] 首条 Commit 产物 %d 个:",
-						dirName, (int)objs.size());
+						"    #%d tag=%llu type=%d subtype=%d class=%s",
+						(int)k, (unsigned long long)o->Tag(), t, s, cls);
 					CommonUtils::print_msg(fmt);
-					for (size_t k = 0; k < objs.size(); ++k)
+					if (!originDim) originDim = ood;
+					if (!fallbackDim) fallbackDim = dynamic_cast<NXOpen::Annotations::Dimension*>(o);
+				}
+				// VB L1553：Commit 返回值本身就是首条坐标标注
+				if (!fallbackDim && commitObj)
+					fallbackDim = dynamic_cast<NXOpen::Annotations::Dimension*>(commitObj);
+				if (!originDim)
+				{
+					// 降级 1：在 part->Dimensions() 中按 tag 增量定位新创建的基准标注
+					for (NXOpen::Annotations::DimensionCollection::iterator dit = part->Dimensions()->begin();
+						dit != part->Dimensions()->end() && !originDim; ++dit)
 					{
-						NXOpen::NXObject* o = objs[k];
-						if (!o) continue;
-						int t = 0, s = 0;
-						UF_OBJ_ask_type_and_subtype(o->Tag(), &t, &s);
-						const char* cls = "未知类型";
-						NXOpen::Annotations::OrdinateOriginDimension* ood =
-							dynamic_cast<NXOpen::Annotations::OrdinateOriginDimension*>(o);
-						if (ood) cls = "OrdinateOriginDimension";
-						else if (dynamic_cast<NXOpen::Annotations::HorizontalDimension*>(o))
-							cls = "HorizontalDimension";
-						else if (dynamic_cast<NXOpen::Annotations::VerticalDimension*>(o))
-							cls = "VerticalDimension";
-						else if (dynamic_cast<NXOpen::Annotations::Dimension*>(o))
-							cls = "Dimension(其它子类)";
-						sprintf_s(fmt, sizeof(fmt),
-							"    #%d tag=%llu type=%d subtype=%d class=%s",
-							(int)k, (unsigned long long)o->Tag(), t, s, cls);
-						CommonUtils::print_msg(fmt);
-						if (!originDim) originDim = ood;
-						if (!fallbackDim) fallbackDim = dynamic_cast<NXOpen::Annotations::Dimension*>(o);
-					}
-					// VB L1553：Commit 返回值本身就是首条坐标标注（nXObject6）
-					if (!fallbackDim && commitObj)
-						fallbackDim = dynamic_cast<NXOpen::Annotations::Dimension*>(commitObj);
-					if (!originDim)
-					{
-						// 降级 1：在 part->Dimensions() 中按 tag 增量定位新创建的基准标注
-						for (NXOpen::Annotations::DimensionCollection::iterator dit = part->Dimensions()->begin();
-							dit != part->Dimensions()->end() && !originDim; ++dit)
+						NXOpen::Annotations::OrdinateOriginDimension* d =
+							dynamic_cast<NXOpen::Annotations::OrdinateOriginDimension*>(*dit);
+						if (d && d->Tag() > maxOodTag)
 						{
-							NXOpen::Annotations::OrdinateOriginDimension* d =
-								dynamic_cast<NXOpen::Annotations::OrdinateOriginDimension*>(*dit);
-							if (d && d->Tag() > maxOodTag)
-							{
-								originDim = d;
-								sprintf_s(fmt, sizeof(fmt),
-									"  [%sVB 诊断] 经 Dimensions() 扫描定位新基准标注 tag=%llu",
-									dirName, (unsigned long long)d->Tag());
-								CommonUtils::print_msg(fmt);
-							}
-						}
-						if (!originDim && fallbackDim)
-						{
+							originDim = d;
 							sprintf_s(fmt, sizeof(fmt),
-								"  警告: %sVB 模式：首条产物非 OrdinateOriginDimension，"
-								"降级用普通 Dimension(tag=%llu) 作链式基准",
-								dirName, (unsigned long long)fallbackDim->Tag());
+								"[%sVB 诊断] 经 Dimensions() 扫描定位新基准标注 tag=%llu",
+								dirName, (unsigned long long)d->Tag());
 							CommonUtils::print_msg(fmt);
 						}
-						else if (!originDim)
-						{
-							CommonUtils::print_msg(string("  警告: ") + dirName +
-								"VB 模式：首条 Commit 后未获取任何可作基准的 Dimension");
-						}
-						// VB L1562-1564：首条产出 OrdinateOriginDimension 后，用
-						// OrdinateMargins.CreateInferredMargin 创建链式 margin，
-						// 供后续 builder 的 ActiveVertical/HorizontalMargin 继承。
-						// subtype 取 13(水平)/14(垂直)，与 uf_object_types.h 中
-						// UF_dim_ordinate_horiz/vert_subtype 一致（VB 实测传 14）。
-						if (originDim && !activeMargin)
-						{
-							try
-							{
-								const NXOpen::Point3d& mp = horizontal ? hMargin : vMargin;
-								activeMargin = part->Annotations()->OrdinateMargins()->
-									CreateInferredMargin(originDim, mp,
-										horizontal ? UF_dim_ordinate_horiz_subtype
-										           : UF_dim_ordinate_vert_subtype);
-								if (activeMargin)
-								{
-									sprintf_s(fmt, sizeof(fmt),
-										"  [%sVB 诊断] 已创建链式 margin tag=%llu 位置=(%.3f, %.3f)",
-										dirName, (unsigned long long)activeMargin->Tag(),
-										mp.X, mp.Y);
-									CommonUtils::print_msg(fmt);
-								}
-							}
-							catch (const NXOpen::NXException& em)
-							{
-								sprintf_s(fmt, sizeof(fmt),
-									"  警告: %sVB 模式：链式 margin 创建失败（后续降级为推断放置）: %s",
-									dirName, em.Message());
-								CommonUtils::print_msg(fmt);
-							}
-							catch (...)
-							{
-								CommonUtils::print_msg(string("  警告: ") + dirName +
-									"VB 模式：链式 margin 创建失败（未知异常）");
-							}
-						}
-						// VB L1566-1597：把新创建的 margin 关联到首条坐标标注
-						// （SetAssociativity(3, assoc) + LogForUpdate + DoUpdate），
-						// 否则链式标注无法正确挂接，后续 Active*Margin 可能无效。
-						if (activeMargin && commitObj)
-						{
-							try
-							{
-								NXOpen::Annotations::Associativity* assoc =
-									part->Annotations()->NewAssociativity();
-								assoc->SetFirstObject(activeMargin);
-								assoc->SetSecondObject(NULL);
-								assoc->SetObjectView(NULL);
-								assoc->SetPointOption(NXOpen::Annotations::AssociativityPointOptionNone);
-								assoc->SetLineOption(NXOpen::Annotations::AssociativityLineOptionNone);
-								assoc->SetFirstDefinitionPoint(NXOpen::Point3d(0.0, 0.0, 0.0));
-								assoc->SetSecondDefinitionPoint(NXOpen::Point3d(0.0, 0.0, 0.0));
-								assoc->SetAngle(0.0);
-								assoc->SetPickPoint(NXOpen::Point3d(0.0, 0.0, 0.0));
-								NXOpen::Annotations::Dimension* dim =
-									dynamic_cast<NXOpen::Annotations::Dimension*>(commitObj);
-								if (dim)
-								{
-									dim->SetAssociativity(3, assoc);
-									CommonUtils::get_session()->UpdateManager()->LogForUpdate(dim);
-									// VB L1599-1600：提交后立即 DoUpdate 一次，让 margin 关联生效
-									NXOpen::Session::UndoMarkId um = CommonUtils::get_session()->SetUndoMark(
-										NXOpen::Session::MarkVisibilityInvisible, "坐标尺寸 margin 关联");
-									CommonUtils::get_session()->UpdateManager()->DoUpdate(um);
-									sprintf_s(fmt, sizeof(fmt),
-										"  [%sVB 诊断] margin tag=%llu 已关联到首条标注 tag=%llu",
-										dirName, (unsigned long long)activeMargin->Tag(),
-										(unsigned long long)dim->Tag());
-									CommonUtils::print_msg(fmt);
-								}
-								// 注：C++ 的 Associativity 无 Dispose（VB 才有），对象由 NX 会话管理
-							}
-							catch (const NXOpen::NXException& em2)
-							{
-								sprintf_s(fmt, sizeof(fmt),
-									"  警告: %sVB 模式：margin 关联到标注失败: %s",
-									dirName, em2.Message());
-								CommonUtils::print_msg(fmt);
-							}
-							catch (...)
-							{
-								CommonUtils::print_msg(string("  警告: ") + dirName +
-									"VB 模式：margin 关联到标注失败（未知异常）");
-							}
-						}
+					}
+					if (!originDim && fallbackDim)
+					{
+						sprintf_s(fmt, sizeof(fmt),
+							"  警告: %sVB 模式：首条产物非 OrdinateOriginDimension，降级用普通 Dimension(tag=%llu) 作链式基准",
+							dirName, (unsigned long long)fallbackDim->Tag());
+						CommonUtils::print_msg(fmt);
+					}
+					else if (!originDim)
+					{
+						sprintf_s(fmt, sizeof(fmt),
+							"  警告: %sVB 模式：首条 Commit 后未获取任何可作基准的 Dimension", dirName);
+						CommonUtils::print_msg(fmt);
 					}
 				}
-				ob->Destroy();
-				ob = NULL;
-				++created;
-			}
-			catch (const NXOpen::NXException& e)
-			{
-				if (ob) { ob->Destroy(); ob = NULL; }
-				++failed;
-				if (failed <= 3)
+				// VB L1562-1564：首条产出 OrdinateOriginDimension 后，用
+				// OrdinateMargins.CreateInferredMargin 创建链式 margin，
+				// 供后续 builder 的 ActiveVertical/HorizontalMargin 继承。
+				if (originDim && !activeMargin)
 				{
-					sprintf_s(fmt, sizeof(fmt),
-						"  警告: %sVB 逐条 #%d 失败: %s",
-						dirName, (int)i, e.Message());
-					CommonUtils::print_msg(fmt);
+					try
+					{
+						activeMargin = part->Annotations()->OrdinateMargins()->
+							CreateInferredMargin(originDim, marginPt, marginSubtype);
+						if (activeMargin)
+						{
+							sprintf_s(fmt, sizeof(fmt),
+								"[%sVB 诊断] 已创建链式 margin tag=%llu 位置=(%.3f, %.3f)",
+								dirName, (unsigned long long)activeMargin->Tag(),
+								marginPt.X, marginPt.Y);
+							CommonUtils::print_msg(fmt);
+						}
+					}
+					catch (const NXOpen::NXException& em)
+					{
+						sprintf_s(fmt, sizeof(fmt),
+							"  警告: %sVB 模式：链式 margin 创建失败（后续降级为推断放置）: %s",
+							dirName, em.Message());
+						CommonUtils::print_msg(fmt);
+					}
+					catch (...)
+					{
+						sprintf_s(fmt, sizeof(fmt),
+							"  警告: %sVB 模式：链式 margin 创建失败（未知异常）", dirName);
+						CommonUtils::print_msg(fmt);
+					}
 				}
-				if (i == 0) break;   // 基准标注都建不出，后续无意义
+				// VB L1566-1597：把新创建的 margin 关联到首条坐标标注
+				// （SetAssociativity(3, assoc) + LogForUpdate + DoUpdate），
+				// 否则链式标注无法正确挂接，后续 Active*Margin 可能无效。
+				if (activeMargin && commitObj)
+				{
+					try
+					{
+						NXOpen::Annotations::Associativity* assoc =
+							part->Annotations()->NewAssociativity();
+						assoc->SetFirstObject(activeMargin);
+						assoc->SetSecondObject(NULL);
+						assoc->SetObjectView(NULL);
+						assoc->SetPointOption(NXOpen::Annotations::AssociativityPointOptionNone);
+						assoc->SetLineOption(NXOpen::Annotations::AssociativityLineOptionNone);
+						assoc->SetFirstDefinitionPoint(NXOpen::Point3d(0.0, 0.0, 0.0));
+						assoc->SetSecondDefinitionPoint(NXOpen::Point3d(0.0, 0.0, 0.0));
+						assoc->SetAngle(0.0);
+						assoc->SetPickPoint(NXOpen::Point3d(0.0, 0.0, 0.0));
+						NXOpen::Annotations::Dimension* dim =
+							dynamic_cast<NXOpen::Annotations::Dimension*>(commitObj);
+						if (dim)
+						{
+							dim->SetAssociativity(3, assoc);
+							CommonUtils::get_session()->UpdateManager()->LogForUpdate(dim);
+							// VB L1599-1600：提交后立即 DoUpdate 一次，让 margin 关联生效
+							NXOpen::Session::UndoMarkId um = CommonUtils::get_session()->SetUndoMark(
+								NXOpen::Session::MarkVisibilityInvisible, "坐标尺寸 margin 关联");
+							CommonUtils::get_session()->UpdateManager()->DoUpdate(um);
+							sprintf_s(fmt, sizeof(fmt),
+								"[%sVB 诊断] margin tag=%llu 已关联到首条标注 tag=%llu",
+								dirName, (unsigned long long)activeMargin->Tag(),
+								(unsigned long long)dim->Tag());
+							CommonUtils::print_msg(fmt);
+						}
+						// 注：C++ 的 Associativity 无 Dispose（VB 才有），对象由 NX 会话管理
+					}
+					catch (const NXOpen::NXException& em2)
+					{
+						sprintf_s(fmt, sizeof(fmt),
+							"  警告: %sVB 模式：margin 关联到标注失败: %s",
+							dirName, em2.Message());
+						CommonUtils::print_msg(fmt);
+					}
+					catch (...)
+					{
+						sprintf_s(fmt, sizeof(fmt),
+							"  警告: %sVB 模式：margin 关联到标注失败（未知异常）", dirName);
+						CommonUtils::print_msg(fmt);
+					}
+				}
 			}
-			catch (...)
-			{
-				if (ob) { ob->Destroy(); ob = NULL; }
-				++failed;
-				if (i == 0) break;
-			}
+			ob->Destroy();
+			ob = NULL;
+			++created;
 		}
-		sprintf_s(fmt, sizeof(fmt),
-			"[Step3] %sVB 逐条模式: 成功 %d / 失败 %d (链式基准=%s)",
-				dirName, created, failed,
-				originDim ? "OrdinateOriginDimension" : (fallbackDim ? "普通Dimension" : "无"));
-		CommonUtils::print_msg(fmt);
-		return created > 0 ? created : -1;
-	};
-
-	// 头文件语义为"放置方位决定方向"，单个 Builder 无法同时产出水平+垂直两组，
-	// 故分别创建水平组与垂直组两个 Builder；原有两级降级全部失败时
-	// 追加录制 VB 同款逐条模式作为终极降级
-	int hCount = runBuilder(true);
-	if (hCount < 0) hCount = runVbPattern(true);
-	int vCount = runBuilder(false);
-	if (vCount < 0) vCount = runVbPattern(false);
-
-	const std::string hStr = (hCount >= 0) ? std::to_string(hCount) + " 条" : "失败";
-	const std::string vStr = (vCount >= 0) ? std::to_string(vCount) + " 条" : "失败";
+		catch (const NXOpen::NXException& e)
+		{
+			if (ob) { ob->Destroy(); ob = NULL; }
+			++failed;
+			if (failed <= 3)
+			{
+				sprintf_s(fmt, sizeof(fmt),
+					"  警告: %sVB 逐条 #%d 失败: %s",
+					dirName, (int)i, e.Message());
+				CommonUtils::print_msg(fmt);
+			}
+			if (i == 0) break;   // 基准标注都建不出，后续无意义
+		}
+		catch (...)
+		{
+			if (ob) { ob->Destroy(); ob = NULL; }
+			++failed;
+			if (i == 0) break;
+		}
+	}
 	sprintf_s(fmt, sizeof(fmt),
-		"[Step3] 水平坐标标注 %s / 垂直坐标标注 %s / 轮廓边 %d 条",
-		hStr.c_str(), vStr.c_str(), (int)curves.size());
+		"[Step3] %s VB 逐条模式: 成功 %d / 失败 %d (链式基准=%s ，间隔=%.1f mm)",
+		dirName, created, failed,
+		originDim ? "OrdinateOriginDimension" : (fallbackDim ? "普通Dimension" : "无"),
+		spacing);
 	CommonUtils::print_msg(fmt);
+
+	// 刷新显示
+	CommonUtils::silent_update(CommonUtils::get_session());
 }
 
 //==============================================================================
@@ -796,14 +869,14 @@ void do_it()
 		}
 		if (!sheet) { CommonUtils::print_msg("[Step3] 警告：未找到任何图纸，请先运行 Step1"); return; }
 		CommonUtils::print_msg("[Step3] 已激活图纸");
-		
+
 		// ---- 诊断：列举图纸上所有视图（排查多余视图致标注挂载错误） ----
 		{
 			std::vector<NXOpen::Drawings::DraftingView*> sheetViews = sheet->GetDraftingViews();
 			const int nViews = (int)sheetViews.size();
 			char fmt[256];
 			sprintf_s(fmt, sizeof(fmt),
-				"[Step3 视图诊断] 图纸 \"%s\" 上共有 %d 个视图:",
+				"[Step3 视图诊断] 图纸 "%s" 上共有 %d 个视图:",
 				sheet->Name().GetText(), nViews);
 			CommonUtils::print_msg(fmt);
 			for (size_t idx = 0; idx < sheetViews.size(); ++idx)
@@ -823,14 +896,12 @@ void do_it()
 				CommonUtils::print_msg(fmt);
 			}
 		}
-		
+
 		NXOpen::Drawings::SectionView* sectionView = CommonUtils::find_section_view(part);
 		if (!sectionView) { CommonUtils::print_msg("[Step3] 未找到剖视图，请先运行 Step1"); return; }
 
-		NXOpen::Annotations::Centerline2d* centerlineObj = CommonUtils::find_centerline(part);
-		if (!centerlineObj) { CommonUtils::print_msg("[Step3] 未找到中心线，请先运行 Step5"); return; }
-
-		phase_auto_contour_dims(part, sectionView, centerlineObj);
+		// v2 起不再依赖 Step5 中心线：坐标原点由用户带捕捉点选
+		phase_pick_ordinate_dims(part, sectionView);
 
 		CommonUtils::print_msg("========== Step3 坐标标注 完成 ==========");
 	}
