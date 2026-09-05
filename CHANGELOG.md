@@ -39,6 +39,8 @@
 - 运行时修复2：do_it 不再遍历图纸并 s->Open()（v1 行为会切换工作活动图纸），
   改为只读当前活动图纸（CurrentDrawingSheet()，空则 UF_DRAW_ask_current_drawing
   兜底），剖视图仅在本图纸上查找；当前图纸无剖视图时提示手动激活而非切换。
+- 功能：选线交互改为「点选一条线段 → 沿相连轮廓自动成链」（grow_chain：端点重合
+  容差 0.05 + 切向延续评分 cos60° 分叉即停），确认框可取消重选，不再逐条多选。
 - 运行时修复3（坐标空间）：UF_UI_point_construct 在制图成员视图内拾取返回图纸
   坐标，与 UF_MODL_ask_curve_props 的绝对模型坐标不同空间，原点吸附永远失败
   （最近距离停在初始容差值）；改为 UF_VIEW_map_drawing_to_model(sectionView)

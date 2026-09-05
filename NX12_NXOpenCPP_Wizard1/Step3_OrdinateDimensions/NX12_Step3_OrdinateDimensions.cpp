@@ -26,6 +26,8 @@
 //     · do_it 不切换图纸（用户要求）：只读当前活动图纸（CurrentDrawingSheet()，
 //       空则 UF_DRAW_ask_current_drawing 兜底），剖视图仅在本图纸视图上查找；
 //       无剖视图时提示手动激活，绝不 Open。
+//     · 自动成链（grow_chain）：点选一条线段后沿"端点重合 + 切向延续"（cos60°
+//       分叉即停）自动选出整条相连轮廓，确认框可取消重选，替代逐条多选。
 //     · 坐标空间坑（实测）：UF_UI_point_construct 在制图成员视图内拾取返回的是
 //       图纸（绘图）坐标，而 UF_MODL_ask_curve_props 端点是绝对模型坐标——
 //       匹配失败时 bestDist 停留在初始容差值即铁证；用 UF_VIEW_map_drawing_to_model
@@ -93,6 +95,8 @@ static const double kSpacingMin      = 0.5;   // 排列间隔下限（mm）
 static const double kSpacingMax      = 200.0; // 排列间隔上限（mm）
 static const double kOriginTol       = 0.05;  // 原点捕捉点匹配曲线特征点的容差（模型单位）
 static const double kDupTol          = 0.01;  // 端点去重容差（模型单位）
+static const double kChainTol        = 0.05;  // 自动成链：端点重合容差（模型单位）
+static const double kChainMinDot     = 0.5;   // 自动成链：切向延续阈值（cos60°，分叉即停）
 
 //==============================================================================
 // 坐标标注参数对话框（Win32 内存模板，无需 .dlx 模板文件，Step6 同款范式）
@@ -226,6 +230,83 @@ namespace OrdDlg
 } // namespace OrdDlg
 
 //==============================================================================
+// grow_chain —— 沿相连轮廓自动成链（种子曲线 → 端点相连 + 切向延续生长）
+// 返回链上曲线在 curves 中的下标；种子未命中/无端点数据时返回空。
+// 生长规则：从种子两端分别出发，在 kChainTol 内找端点重合的未用曲线；
+// 多条候选取"穿过结合点方向"最延续者（单位切向点积 > kChainMinDot ≈ cos60°），
+// 分叉（角度过大）或无候选即停；整圆（is_closed）自成一条不参与生长。
+//==============================================================================
+static std::vector<int> grow_chain(const std::vector<CommonUtils::CurveInfo>& curves,
+	tag_t seedTag)
+{
+	std::vector<int> chain;
+	int seedIdx = -1;
+	for (size_t i = 0; i < curves.size(); ++i)
+	{
+		if (curves[i].tag == seedTag) { seedIdx = (int)i; break; }
+	}
+	if (seedIdx < 0 || !curves[seedIdx].has_props) return chain;
+
+	std::vector<char> used(curves.size(), 0);
+	used[seedIdx] = 1;
+	chain.push_back(seedIdx);
+	if (curves[seedIdx].is_closed) return chain;   // 整圆自成一条
+
+	auto unitDot = [](const double* a, const double* b) -> double
+	{
+		const double la = sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+		const double lb = sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2]);
+		if (la < 1e-9 || lb < 1e-9) return 0.0;
+		return (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (la * lb);
+	};
+	// 从曲线 cur 的 port 端（0=start，1=end）出发生长。
+	// 延续评分用"穿过结合点的方向"：曲线端部切矢指向曲线外侧（start_tg 指向
+	// 曲线内部，end_tg 指向越过端点），故：
+	//   port=start → 穿过方向 = -start_tg；port=end → 穿过方向 = +end_tg；
+	//   p2=start  → 邻接穿过方向 = +start_tg；p2=end → -end_tg。
+	// 平滑延续两方向同向（点积≈+1），折返≈-1，垂直分叉≈0。
+	auto growFrom = [&](int cur, int port)
+	{
+		for (;;)
+		{
+			const CommonUtils::CurveInfo& c = curves[cur];
+			const double* jp = (port == 0) ? c.start_pt : c.end_pt;
+			double thru[3];
+			if (port == 0) { thru[0] = -c.start_tg[0]; thru[1] = -c.start_tg[1]; thru[2] = -c.start_tg[2]; }
+			else           { thru[0] =  c.end_tg[0];   thru[1] =  c.end_tg[1];   thru[2] =  c.end_tg[2]; }
+			int bestIdx = -1, bestPort = -1;
+			double bestScore = kChainMinDot;
+			for (size_t i = 0; i < curves.size(); ++i)
+			{
+				if (used[i]) continue;
+				const CommonUtils::CurveInfo& n = curves[i];
+				if (!n.has_props || n.is_closed) continue;
+				for (int p2 = 0; p2 < 2; ++p2)
+				{
+					const double* np = (p2 == 0) ? n.start_pt : n.end_pt;
+					const double dx = np[0] - jp[0], dy = np[1] - jp[1];
+					if (dx * dx + dy * dy >= kChainTol * kChainTol) continue;
+					double nthru[3];
+					if (p2 == 0) { nthru[0] =  n.start_tg[0]; nthru[1] =  n.start_tg[1]; nthru[2] =  n.start_tg[2]; }
+					else         { nthru[0] = -n.end_tg[0];   nthru[1] = -n.end_tg[1];   nthru[2] = -n.end_tg[2]; }
+					const double s = unitDot(thru, nthru);
+					if (s > bestScore) { bestScore = s; bestIdx = (int)i; bestPort = p2; }
+				}
+			}
+			if (bestIdx < 0) return;   // 无延续（端点或分叉角度过大）
+			used[bestIdx] = 1;
+			chain.push_back(bestIdx);
+			cur = bestIdx;
+			port = (bestPort == 0) ? 1 : 0;   // 从邻接曲线的另一端口继续
+		}
+	};
+	growFrom(seedIdx, 0);
+	growFrom(seedIdx, 1);
+	return chain;
+}
+
+
+//==============================================================================
 // phase_pick_ordinate_dims —— 交互式坐标标注（v2 主流程）
 // 流程：幂等警示 → 光标视图切 0 → 多选投影线段 → 取每条线段两端点并去重
 //       → UF_UI_point_construct（推断点，带捕捉）拾取原点 → 视图曲线中吸附
@@ -282,11 +363,15 @@ void phase_pick_ordinate_dims(NXOpen::Part* part,
 		}
 	}
 
-	// ---- 1. 多选投影线段（视图相关几何，须切"任意视图"） ----
-	// 坑（实测）：不带掩码的 SelectTaggedObjects 会继承 NX 会话 Class Selection
-	// 上一次残留的过滤器（停在"视图/尺寸"上，选不中曲线）；改用 MaskTriple
-	// 重载 + ClearAndEnableSpecific 强制只允许曲线/边：截面边为
-	// line/circle/conic/spline（UF_*_type），模型边为 UF_solid_type + ANY_EDGE。
+	// ---- 1. 视图曲线枚举（自动成链与原点吸附共用，只跑一次） ----
+	const std::vector<CommonUtils::CurveInfo> curves =
+		CommonUtils::enumerate_view_curves(sectionView);
+
+	// ---- 2. 点选一条线段，沿相连轮廓自动成链 ----
+	// 选择坑（实测）：不带掩码的 Select* 会继承 NX 会话 Class Selection 上一次
+	// 残留的过滤器（停在"视图/尺寸"上选不中曲线）；用 MaskTriple 重载 +
+	// ClearAndEnableSpecific 强制只允许曲线/边。成链算法见 grow_chain；
+	// 确认框可取消重选。
 	int oldCursorView = 1;
 	UF_UI_ask_cursor_view(&oldCursorView);
 	UF_UI_set_cursor_view(0);
@@ -298,25 +383,41 @@ void phase_pick_ordinate_dims(NXOpen::Part* part,
 	masks.push_back(NXOpen::Selection::MaskTriple(UF_spline_type, UF_all_subtype, 0));
 	masks.push_back(NXOpen::Selection::MaskTriple(UF_solid_type, UF_all_subtype, UF_UI_SEL_FEATURE_ANY_EDGE));
 
-	std::vector<NXOpen::TaggedObject*> picked;
-	NXOpen::Selection::Response rsp =
-		CommonUtils::get_ui()->SelectionManager()->SelectTaggedObjects(
-			"选择剖视图内的投影轮廓线段（逐条单击，MB2/确定结束）", "Step3 坐标标注",
-			NXOpen::Selection::SelectionScopeWorkPart,
-			NXOpen::Selection::SelectionActionClearAndEnableSpecific,
-			false, true, masks, picked);
-
+	std::vector<int> chain;
+	bool confirmed = false;
+	while (!confirmed)
+	{
+		NXOpen::TaggedObject* seed = NULL;
+		NXOpen::Point3d cur;
+		NXOpen::Selection::Response rsp =
+			CommonUtils::get_ui()->SelectionManager()->SelectTaggedObject(
+				"点选一条投影轮廓线段（沿相连轮廓自动成链）", "Step3 坐标标注",
+				NXOpen::Selection::SelectionScopeWorkPart,
+				NXOpen::Selection::SelectionActionClearAndEnableSpecific,
+				false, true, masks, &seed, &cur);
+		if (rsp != NXOpen::Selection::ResponseOk &&
+			rsp != NXOpen::Selection::ResponseObjectSelected &&
+			rsp != NXOpen::Selection::ResponseBack)
+		{
+			UF_UI_set_cursor_view(oldCursorView);
+			CommonUtils::print_msg("[Step3] 已跳过坐标标注（未选择线段）");
+			return;
+		}
+		if (!seed) continue;
+		chain = grow_chain(curves, seed->Tag());
+		if (chain.empty()) continue;   // 种子未在视图曲线中命中，重选
+		WCHAR wmsg[128];
+		swprintf_s(wmsg, 128, L"已自动成链 %d 条线段（端点相连）。\n确定=继续；取消=重新选线", (int)chain.size());
+		const int mb = MessageBoxW(GetActiveWindow(), wmsg, L"自动成链", MB_OKCANCEL | MB_ICONQUESTION);
+		confirmed = (mb == IDOK);
+	}
 	UF_UI_set_cursor_view(oldCursorView);
 
-	if (rsp != NXOpen::Selection::ResponseOk &&
-		rsp != NXOpen::Selection::ResponseObjectSelected &&
-		rsp != NXOpen::Selection::ResponseBack)
-	{
-		CommonUtils::print_msg("[Step3] 已跳过坐标标注（未选择线段）");
-		return;
-	}
+	sprintf_s(fmt, sizeof(fmt),
+		"[Step3] 自动成链 %d 条线段", (int)chain.size());
+	CommonUtils::print_msg(fmt);
 
-	// ---- 2. 取每条选中线段两端点（parm=0/1），0.01 容差去重 ----
+	// ---- 3. 取链上每条线段两端点，0.01 容差去重 ----
 	struct EndPt
 	{
 		NXOpen::DisplayableObject* disp;
@@ -326,47 +427,19 @@ void phase_pick_ordinate_dims(NXOpen::Part* part,
 		int hostSubtype;
 	};
 	std::vector<EndPt> endPts;
-	int segCount = 0, propFail = 0, dupMerged = 0;
-	for (size_t i = 0; i < picked.size(); ++i)
+	int dupMerged = 0;
+	for (size_t ci = 0; ci < chain.size(); ++ci)
 	{
-		NXOpen::DisplayableObject* disp =
-			dynamic_cast<NXOpen::DisplayableObject*>(picked[i]);
-		if (!disp)
-		{
-			sprintf_s(fmt, sizeof(fmt),
-				"  警告: 所选对象 #%d 非显示对象，已跳过", (int)i);
-			CommonUtils::print_msg(fmt);
-			continue;
-		}
-		++segCount;
-		int t = 0, s = 0;
-		UF_OBJ_ask_type_and_subtype(disp->Tag(), &t, &s);
-
-		double pt0[3] = { 0,0,0 }, pt1[3] = { 0,0,0 };
-		bool ok0 = false, ok1 = false;
+		const CommonUtils::CurveInfo& info = curves[chain[ci]];
+		if (!info.has_props) continue;
+		NXOpen::DisplayableObject* disp = dynamic_cast<NXOpen::DisplayableObject*>(
+			NXOpen::NXObjectManager::Get(info.tag));
+		if (!disp) continue;
+		const int t = info.type, s = info.subtype;
 		for (int e = 0; e < 2; ++e)
 		{
-			double pt[3], tg[3], pn[3], bn[3], torsion = 0.0, roc = 0.0;
-			const double parm = (e == 0) ? 0.0 : 1.0;
-			if (UF_MODL_ask_curve_props(disp->Tag(), parm, pt, tg, pn, bn, &torsion, &roc) != 0)
-			{
-				++propFail;
-				continue;
-			}
-			if (e == 0) { memcpy(pt0, pt, sizeof(pt0)); ok0 = true; }
-			else        { memcpy(pt1, pt, sizeof(pt1)); ok1 = true; }
-		}
-		// 封闭曲线（整圆等）：parm=0 与 parm=1 是同一点，只标注一次
-		if (ok0 && ok1)
-		{
-			const double dx = pt0[0] - pt1[0], dy = pt0[1] - pt1[1];
-			if (dx * dx + dy * dy < kDupTol * kDupTol) ok1 = false;
-		}
-		for (int e = 0; e < 2; ++e)
-		{
-			if (e == 0 && !ok0) continue;
-			if (e == 1 && !ok1) continue;
-			const double* p = (e == 0) ? pt0 : pt1;
+			if (info.is_closed && e == 1) continue;   // 整圆：两端点重合只取一端
+			const double* p = (e == 0) ? info.start_pt : info.end_pt;
 			int dupIdx = -1;
 			for (size_t k = 0; k < endPts.size(); ++k)
 			{
@@ -403,16 +476,14 @@ void phase_pick_ordinate_dims(NXOpen::Part* part,
 		}
 	}
 	sprintf_s(fmt, sizeof(fmt),
-		"[Step3] 已选择线段 %d 条，端点去重后 %d 个（合并 %d 次，属性读取失败 %d 次）",
-		segCount, (int)endPts.size(), dupMerged, propFail);
+		"[Step3] 成链端点去重后 %d 个（合并 %d 次）", (int)endPts.size(), dupMerged);
 	CommonUtils::print_msg(fmt);
 	if (endPts.empty())
 	{
-		CommonUtils::print_msg("[Step3] 已跳过坐标标注（所选线段未取到有效端点）");
+		CommonUtils::print_msg("[Step3] 已跳过坐标标注（成链线段未取到有效端点）");
 		return;
 	}
-
-	// ---- 3. 带捕捉点选坐标原点（UF_UI_point_construct 推断点模式） ----
+	// ---- 4. 带捕捉点选坐标原点（UF_UI_point_construct 推断点模式） ----
 	// 推断点模式可捕捉曲线端点/中点/圆心等；生成的临时关联点随后删除。
 	// 注意：NXOpen::Point 继承 SmartObject 而非 DisplayableObject，不能直接
 	// 作 OrdinateOrigin 的关联对象，故只用其坐标到视图曲线中吸附特征点。
@@ -440,15 +511,13 @@ void phase_pick_ordinate_dims(NXOpen::Part* part,
 		CommonUtils::print_msg(fmt);
 	}
 
-	// ---- 4. 在视图曲线中吸附原点特征点（最近端点/中点/圆心，容差 kOriginTol） ----
+	// ---- 5. 在视图曲线中吸附原点特征点（最近端点/中点/圆心，容差 kOriginTol） ----
 	// 坐标空间坑（实测 2026-09-05）：UF_UI_point_construct 在制图成员视图内拾取
 	// 返回的是图纸（绘图）坐标（拾取点落在剖视图边界内），而 CurveInfo 端点来自
 	// UF_MODL_ask_curve_props 是绝对模型坐标——两套坐标系直接比距离永远匹配不上
 	// （日志里"距最近特征点"停留在初始容差值即铁证）。修法：用
 	// UF_VIEW_map_drawing_to_model 把拾取点映射到模型坐标再匹配；为兼容两种
-	// 坐标行为，原始坐标与映射坐标两路匹配取优。
-	const std::vector<CommonUtils::CurveInfo> curves =
-		CommonUtils::enumerate_view_curves(sectionView);
+	// 坐标行为，原始坐标与映射坐标两路匹配取优。（curves 已在步骤1枚举）
 
 	double rawPt[3] = { originPt[0], originPt[1], originPt[2] };
 	double mappedPt[3] = { originPt[0], originPt[1], originPt[2] };
@@ -547,7 +616,7 @@ void phase_pick_ordinate_dims(NXOpen::Part* part,
 		CommonUtils::print_msg(fmt);
 	}
 
-	// ---- 5. 对话框：测量方向 + 排列间隔 ----
+	// ---- 6. 对话框：测量方向 + 排列间隔 ----
 	OrdDlg::Result res;
 	if (!OrdDlg::Show(kDefaultSpacing, res))
 	{
@@ -557,7 +626,7 @@ void phase_pick_ordinate_dims(NXOpen::Part* part,
 	const bool measureX = res.measureX;   // true=测 X（垂直坐标标注）；false=测 Y（水平坐标标注）
 	const double spacing = res.spacing;
 
-	// ---- 6. 过滤被测端点并按坐标值升序排序 ----
+	// ---- 7. 过滤被测端点并按坐标值升序排序 ----
 	// 任务#17 教训：被测点不能落在基准曲线自身上（NX 会推断出零长度尺寸）；
 	// 与原点重合的点也不标注。
 	std::vector<EndPt> meas;
@@ -595,7 +664,7 @@ void phase_pick_ordinate_dims(NXOpen::Part* part,
 		}
 	}
 
-	// ---- 7. 视图边界与 margin / 放置位置（图纸坐标） ----
+	// ---- 8. 视图边界与 margin / 放置位置（图纸坐标） ----
 	double b[4] = { 0.0, 0.0, 0.0, 0.0 };
 	int rcB = UF_DRAW_ask_view_borders(sectionView->Tag(), b);
 	bool borderOk = (rcB == 0);
@@ -637,7 +706,7 @@ void phase_pick_ordinate_dims(NXOpen::Part* part,
 		CommonUtils::print_msg(fmt);
 	}
 
-	// ---- 8. 录制 VB 忠实逐条链式生成（单方向） ----
+	// ---- 9. 录制 VB 忠实逐条链式生成（单方向） ----
 	// 录制宏 000R_VB.vb 成功模式（L1364/L1434/L1527/L1564/L1614/L1722/L1817）：
 	//   首条：OrdinateOrigin.SetValue(SnapType, 基准曲线, 视图, 特征点, NULL, NULL,
 	//         (0,0,0)) + SecondAssociativities.SetValue(snap, 端点曲线, 视图, 端点,
