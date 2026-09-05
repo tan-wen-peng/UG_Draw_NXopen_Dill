@@ -20,6 +20,12 @@
 //       重合（0.05mm 内）的点；任务#24 放置控制保留：显式放置原点按间隔步进。
 //     · 幂等保护降级为警示：检测到本视图已有坐标标注时仅打印数量告警，
 //       不再拦截（交互模式用户有意追加，且 v1 的全视图拦截误伤跨批次补标）。
+//     · 选择过滤器坑（实测）：不带掩码的 SelectTaggedObjects 会继承 NX 会话
+//       Class Selection 残留过滤器（停在"视图/尺寸"上选不中曲线），改用
+//       MaskTriple 重载 + SelectionActionClearAndEnableSpecific（曲线/边掩码）。
+//     · do_it 不切换图纸（用户要求）：只读当前活动图纸（CurrentDrawingSheet()，
+//       空则 UF_DRAW_ask_current_drawing 兜底），剖视图仅在本图纸视图上查找；
+//       无剖视图时提示手动激活，绝不 Open。
 //     · Step3 不再依赖 Step5 中心线（原点由用户点选）。
 //   v1 (原) 自动枚举剖视图轮廓端点，成组水平/垂直坐标标注（中心线/截面边基准）。
 //------------------------------------------------------------------------------
@@ -68,7 +74,9 @@
 #include <NXOpen/Selection.hxx>                           // SelectTaggedObjects（多选）
 #include <NXOpen/NXMessageBox.hxx>
 #include <NXOpen/DraftingManager.hxx>                     // part->Drafting()->EnterDraftingApplication()
-#include <uf_object_types.h>        // UF_dimension_type / UF_dim_ordinate_*_subtype
+#include <NXOpen/Drawings_SelectDraftingView.hxx>          // Origin()->AnnotationView() 完整类型（缺则 C2027）
+#include <uf_object_types.h>        // UF_dimension_type / UF_dim_ordinate_*_subtype / UF_*_type
+#include <uf_ui_types.h>             // UF_UI_SEL_FEATURE_ANY_EDGE（选择掩码）
 #include <algorithm>                // std::stable_sort
 #include <stdio.h>                  // sprintf_s
 #include <vector>
@@ -271,15 +279,28 @@ void phase_pick_ordinate_dims(NXOpen::Part* part,
 	}
 
 	// ---- 1. 多选投影线段（视图相关几何，须切"任意视图"） ----
+	// 坑（实测）：不带掩码的 SelectTaggedObjects 会继承 NX 会话 Class Selection
+	// 上一次残留的过滤器（停在"视图/尺寸"上，选不中曲线）；改用 MaskTriple
+	// 重载 + ClearAndEnableSpecific 强制只允许曲线/边：截面边为
+	// line/circle/conic/spline（UF_*_type），模型边为 UF_solid_type + ANY_EDGE。
 	int oldCursorView = 1;
 	UF_UI_ask_cursor_view(&oldCursorView);
 	UF_UI_set_cursor_view(0);
 
+	std::vector<NXOpen::Selection::MaskTriple> masks;
+	masks.push_back(NXOpen::Selection::MaskTriple(UF_line_type, UF_all_subtype, 0));
+	masks.push_back(NXOpen::Selection::MaskTriple(UF_circle_type, UF_all_subtype, 0));
+	masks.push_back(NXOpen::Selection::MaskTriple(UF_conic_type, UF_all_subtype, 0));
+	masks.push_back(NXOpen::Selection::MaskTriple(UF_spline_type, UF_all_subtype, 0));
+	masks.push_back(NXOpen::Selection::MaskTriple(UF_solid_type, UF_all_subtype, UF_UI_SEL_FEATURE_ANY_EDGE));
+
 	std::vector<NXOpen::TaggedObject*> picked;
 	NXOpen::Selection::Response rsp =
 		CommonUtils::get_ui()->SelectionManager()->SelectTaggedObjects(
-			"选择投影轮廓线段（可多选，确定/MB2 结束）", "Step3 坐标标注",
-			NXOpen::Selection::SelectionScopeWorkPart, false, true, picked);
+			"选择剖视图内的投影轮廓线段（逐条单击，MB2/确定结束）", "Step3 坐标标注",
+			NXOpen::Selection::SelectionScopeWorkPart,
+			NXOpen::Selection::SelectionActionClearAndEnableSpecific,
+			false, true, masks, picked);
 
 	UF_UI_set_cursor_view(oldCursorView);
 
@@ -857,26 +878,36 @@ void do_it()
 		part->Drafting()->EnterDraftingApplication();
 		CommonUtils::print_msg("[Step3] 已进入制图模块");
 
-		// ===== 激活图纸 =====
-		// 遍历图纸集合，打开第一张图纸（单图纸场景与原始流程一致）
-		NXOpen::Drawings::DraftingDrawingSheet* sheet = NULL;
-		for (NXOpen::Drawings::DraftingDrawingSheetCollection::iterator it =
-			part->DraftingDrawingSheets()->begin();
-			it != part->DraftingDrawingSheets()->end(); ++it)
+		// ===== 当前活动图纸（v2：只读，绝不 Open/切换图纸）=====
+		// 用户要求 Step3 不得切换工作活动图纸：主路径 CurrentDrawingSheet()；
+		// 为空再走 UF_DRAW_ask_current_drawing 兜底（同样只读）。找不到就提示
+		// 用户手动激活，不做任何切换操作。
+		NXOpen::Drawings::DraftingDrawingSheet* sheet =
+			part->DraftingDrawingSheets()->CurrentDrawingSheet();
+		if (!sheet)
 		{
-			NXOpen::Drawings::DraftingDrawingSheet* s = *it;
-			if (s) { s->Open(); sheet = s; break; }
+			tag_t drawTag = NULL_TAG;
+			if (UF_DRAW_ask_current_drawing(&drawTag) == 0 && drawTag != NULL_TAG)
+			{
+				NXOpen::TaggedObject* tobj = NXOpen::NXObjectManager::Get(drawTag);
+				sheet = dynamic_cast<NXOpen::Drawings::DraftingDrawingSheet*>(tobj);
+			}
 		}
-		if (!sheet) { CommonUtils::print_msg("[Step3] 警告：未找到任何图纸，请先运行 Step1"); return; }
-		CommonUtils::print_msg("[Step3] 已激活图纸");
+		if (!sheet)
+		{
+			CommonUtils::print_msg("[Step3] 未找到活动图纸：Step3 不切换图纸，请先在 NX 中激活目标图纸再运行");
+			return;
+		}
+		CommonUtils::print_msg("[Step3] 使用当前活动图纸（不切换）");
 
-		// ---- 诊断：列举图纸上所有视图（排查多余视图致标注挂载错误） ----
+		// ---- 诊断：列举当前图纸上所有视图，并在其上找剖视图 ----
+		NXOpen::Drawings::SectionView* sectionView = NULL;
 		{
 			std::vector<NXOpen::Drawings::DraftingView*> sheetViews = sheet->GetDraftingViews();
 			const int nViews = (int)sheetViews.size();
 			char fmt[256];
 			sprintf_s(fmt, sizeof(fmt),
-				"[Step3 视图诊断] 图纸 "%s" 上共有 %d 个视图:",
+				"[Step3 视图诊断] 当前图纸 \"%s\" 上共有 %d 个视图:",
 				sheet->Name().GetText(), nViews);
 			CommonUtils::print_msg(fmt);
 			for (size_t idx = 0; idx < sheetViews.size(); ++idx)
@@ -885,7 +916,10 @@ void do_it()
 				if (!v) continue;
 				const char* vtype = "DraftingView";
 				if (dynamic_cast<NXOpen::Drawings::SectionView*>(v))
+				{
 					vtype = "SectionView(剖视)";
+					if (!sectionView) sectionView = dynamic_cast<NXOpen::Drawings::SectionView*>(v);
+				}
 				else if (dynamic_cast<NXOpen::Drawings::BaseView*>(v))
 					vtype = "BaseView(基础/载体)";
 				double vb[4] = { 0,0,0,0 };
@@ -896,10 +930,11 @@ void do_it()
 				CommonUtils::print_msg(fmt);
 			}
 		}
-
-		NXOpen::Drawings::SectionView* sectionView = CommonUtils::find_section_view(part);
-		if (!sectionView) { CommonUtils::print_msg("[Step3] 未找到剖视图，请先运行 Step1"); return; }
-
+		if (!sectionView)
+		{
+			CommonUtils::print_msg("[Step3] 当前图纸没有剖视图：请激活包含剖视图的图纸后再运行（Step3 不切换图纸）");
+			return;
+		}
 		// v2 起不再依赖 Step5 中心线：坐标原点由用户带捕捉点选
 		phase_pick_ordinate_dims(part, sectionView);
 

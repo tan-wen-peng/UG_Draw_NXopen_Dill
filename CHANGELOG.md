@@ -26,6 +26,19 @@
 
 ### 部署
 - 同前：构建 NX12_MultiModule.sln（Release x64）后部署 DLL，菜单注册不变。
+- 编译修复：Step3 vcxproj 的 Debug/Release|x64 ClCompile 补
+  `/d1scalableinclude- /utf-8 /wd4819 %(AdditionalOptions)`（旧工程缺 /utf-8，
+  UTF-8 源文件在 936 代码页下报 C4819 + C2001「常量中有换行符」连环错，与 Step9 对齐）。
+- 编译修复2：补 `#include <NXOpen/Drawings_SelectDraftingView.hxx>`（Origin()->AnnotationView()
+  需要完整类型，缺则 C2027）。
+- 编译修复3：do_it 视图诊断日志的字符串内嵌引号恢复转义（\"%s\" 曾被写成 \"%s\" 外的
+  裸引号，字符串提前截断报 C2065/C2665 且行号漂移）。
+- 运行时修复：多选线段改用 SelectTaggedObjects 的 MaskTriple 重载 +
+  SelectionActionClearAndEnableSpecific（曲线/边掩码），不带掩码会继承 NX 会话
+  Class Selection 残留过滤器导致选不中曲线（实测停在"视图/尺寸"上）。
+- 运行时修复2：do_it 不再遍历图纸并 s->Open()（v1 行为会切换工作活动图纸），
+  改为只读当前活动图纸（CurrentDrawingSheet()，空则 UF_DRAW_ask_current_drawing
+  兜底），剖视图仅在本图纸上查找；当前图纸无剖视图时提示手动激活而非切换。
 
 ## [1.5.0] - 2026-09-01 —— Step9 v7 草图复用（曲线级幂等）
 
