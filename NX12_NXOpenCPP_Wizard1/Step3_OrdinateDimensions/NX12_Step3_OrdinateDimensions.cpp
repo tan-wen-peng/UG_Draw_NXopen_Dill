@@ -26,6 +26,10 @@
 //     · do_it 不切换图纸（用户要求）：只读当前活动图纸（CurrentDrawingSheet()，
 //       空则 UF_DRAW_ask_current_drawing 兜底），剖视图仅在本图纸视图上查找；
 //       无剖视图时提示手动激活，绝不 Open。
+//     · 坐标空间坑（实测）：UF_UI_point_construct 在制图成员视图内拾取返回的是
+//       图纸（绘图）坐标，而 UF_MODL_ask_curve_props 端点是绝对模型坐标——
+//       匹配失败时 bestDist 停留在初始容差值即铁证；用 UF_VIEW_map_drawing_to_model
+//       映射后再匹配，原始/映射两路匹配取优。
 //     · Step3 不再依赖 Step5 中心线（原点由用户点选）。
 //   v1 (原) 自动枚举剖视图轮廓端点，成组水平/垂直坐标标注（中心线/截面边基准）。
 //------------------------------------------------------------------------------
@@ -437,54 +441,98 @@ void phase_pick_ordinate_dims(NXOpen::Part* part,
 	}
 
 	// ---- 4. 在视图曲线中吸附原点特征点（最近端点/中点/圆心，容差 kOriginTol） ----
+	// 坐标空间坑（实测 2026-09-05）：UF_UI_point_construct 在制图成员视图内拾取
+	// 返回的是图纸（绘图）坐标（拾取点落在剖视图边界内），而 CurveInfo 端点来自
+	// UF_MODL_ask_curve_props 是绝对模型坐标——两套坐标系直接比距离永远匹配不上
+	// （日志里"距最近特征点"停留在初始容差值即铁证）。修法：用
+	// UF_VIEW_map_drawing_to_model 把拾取点映射到模型坐标再匹配；为兼容两种
+	// 坐标行为，原始坐标与映射坐标两路匹配取优。
 	const std::vector<CommonUtils::CurveInfo> curves =
 		CommonUtils::enumerate_view_curves(sectionView);
 
-	NXOpen::DisplayableObject* originCurve = NULL;
-	NXOpen::Point3d originFeaturePt(0.0, 0.0, 0.0);
-	NXOpen::InferSnapType::SnapType originSnap = NXOpen::InferSnapType::SnapTypeMid;
-	double bestDist = kOriginTol;
-	for (size_t i = 0; i < curves.size(); ++i)
+	double rawPt[3] = { originPt[0], originPt[1], originPt[2] };
+	double mappedPt[3] = { originPt[0], originPt[1], originPt[2] };
+	bool mappedOk = false;
 	{
-		const CommonUtils::CurveInfo& ci = curves[i];
-		if (!ci.has_props) continue;
-		struct Feat { const double* p; NXOpen::InferSnapType::SnapType snap; };
-		const double midPt[3] = {
-			(ci.start_pt[0] + ci.end_pt[0]) / 2.0,
-			(ci.start_pt[1] + ci.end_pt[1]) / 2.0,
-			(ci.start_pt[2] + ci.end_pt[2]) / 2.0 };
-		Feat feats[4] = {
-			{ ci.start_pt,   NXOpen::InferSnapType::SnapTypeStart  },
-			{ ci.end_pt,     NXOpen::InferSnapType::SnapTypeEnd    },
-			{ midPt,         NXOpen::InferSnapType::SnapTypeMid    },
-			{ ci.arc_center, NXOpen::InferSnapType::SnapTypeCenter }   // 仅圆/圆弧有效
-		};
-		const int nFeat = (ci.type == UF_circle_type) ? 4 : 3;
-		for (int f = 0; f < nFeat; ++f)
+		double draw2d[2] = { originPt[0], originPt[1] };
+		if (UF_VIEW_map_drawing_to_model(sectionView->Tag(), draw2d, mappedPt) == 0)
+			mappedOk = true;
+	}
+	sprintf_s(fmt, sizeof(fmt),
+		"[Step3] 原点坐标: 拾取=(%.3f, %.3f, %.3f) 映射模型坐标%s=(%.3f, %.3f, %.3f)",
+		rawPt[0], rawPt[1], rawPt[2],
+		mappedOk ? "" : "(失败)", mappedPt[0], mappedPt[1], mappedPt[2]);
+	CommonUtils::print_msg(fmt);
+
+	struct Feat { const double* p; NXOpen::InferSnapType::SnapType snap; };
+	struct MatchResult
+	{
+		bool found;
+		NXOpen::DisplayableObject* curve;
+		NXOpen::Point3d pt;
+		NXOpen::InferSnapType::SnapType snap;
+		double dist;
+	};
+	auto scanNearest = [&](const double* probe) -> MatchResult
+	{
+		MatchResult mr;
+		mr.found = false;
+		mr.curve = NULL;
+		mr.pt = NXOpen::Point3d(0.0, 0.0, 0.0);
+		mr.snap = NXOpen::InferSnapType::SnapTypeMid;
+		mr.dist = kOriginTol;
+		for (size_t i = 0; i < curves.size(); ++i)
 		{
-			const double dx = feats[f].p[0] - originPt[0];
-			const double dy = feats[f].p[1] - originPt[1];
-			const double d = sqrt(dx * dx + dy * dy);
-			if (d < bestDist)
+			const CommonUtils::CurveInfo& ci = curves[i];
+			if (!ci.has_props) continue;
+			const double midPt[3] = {
+				(ci.start_pt[0] + ci.end_pt[0]) / 2.0,
+				(ci.start_pt[1] + ci.end_pt[1]) / 2.0,
+				(ci.start_pt[2] + ci.end_pt[2]) / 2.0 };
+			Feat feats[4] = {
+				{ ci.start_pt,   NXOpen::InferSnapType::SnapTypeStart  },
+				{ ci.end_pt,     NXOpen::InferSnapType::SnapTypeEnd    },
+				{ midPt,         NXOpen::InferSnapType::SnapTypeMid    },
+				{ ci.arc_center, NXOpen::InferSnapType::SnapTypeCenter }   // 仅圆/圆弧有效
+			};
+			const int nFeat = (ci.type == UF_circle_type) ? 4 : 3;
+			for (int f = 0; f < nFeat; ++f)
 			{
-				NXOpen::DisplayableObject* disp = dynamic_cast<NXOpen::DisplayableObject*>(
-					NXOpen::NXObjectManager::Get(ci.tag));
-				if (!disp) continue;   // 非显示对象不作基准宿主
-				bestDist = d;
-				originCurve = disp;
-				originFeaturePt = NXOpen::Point3d(feats[f].p[0], feats[f].p[1], feats[f].p[2]);
-				originSnap = feats[f].snap;
+				const double dx = feats[f].p[0] - probe[0];
+				const double dy = feats[f].p[1] - probe[1];
+				const double d = sqrt(dx * dx + dy * dy);
+				if (d < mr.dist)
+				{
+					NXOpen::DisplayableObject* disp = dynamic_cast<NXOpen::DisplayableObject*>(
+						NXOpen::NXObjectManager::Get(ci.tag));
+					if (!disp) continue;   // 非显示对象不作基准宿主
+					mr.found = true;
+					mr.curve = disp;
+					mr.pt = NXOpen::Point3d(feats[f].p[0], feats[f].p[1], feats[f].p[2]);
+					mr.snap = feats[f].snap;
+					mr.dist = d;
+				}
 			}
 		}
-	}
-	if (!originCurve)
+		return mr;
+	};
+	MatchResult rawMatch = scanNearest(rawPt);
+	MatchResult mappedMatch = mappedOk ? scanNearest(mappedPt) : rawMatch;
+	MatchResult best = rawMatch;
+	if (mappedOk && (!best.found || (mappedMatch.found && mappedMatch.dist < best.dist)))
+		best = mappedMatch;
+
+	if (!best.found)
 	{
 		sprintf_s(fmt, sizeof(fmt),
-			"[Step3] 已跳过坐标标注（原点未捕捉到剖视图内几何: 拾取点距最近曲线特征点 %.3f mm，容差 %.2f mm）",
-			bestDist, kOriginTol);
+			"[Step3] 已跳过坐标标注（原点未吸附到曲线特征点: 原始坐标最近 %.3f mm，映射后最近 %.3f mm，容差 %.2f mm；请捕捉剖视图内线段端点/中点/圆心）",
+			rawMatch.dist, mappedMatch.dist, kOriginTol);
 		CommonUtils::print_msg(fmt);
 		return;
 	}
+	NXOpen::DisplayableObject* originCurve = best.curve;
+	NXOpen::Point3d originFeaturePt = best.pt;
+	NXOpen::InferSnapType::SnapType originSnap = best.snap;
 	{
 		int ot = 0, os = 0;
 		UF_OBJ_ask_type_and_subtype(originCurve->Tag(), &ot, &os);
@@ -495,7 +543,7 @@ void phase_pick_ordinate_dims(NXOpen::Part* part,
 		sprintf_s(fmt, sizeof(fmt),
 			"[Step3] 原点已吸附: 曲线 tag=%llu type=%d subtype=%d snap=%s 特征点=(%.3f, %.3f) 距离=%.4f mm",
 			(unsigned long long)originCurve->Tag(), ot, os, snapName,
-			originFeaturePt.X, originFeaturePt.Y, bestDist);
+			originFeaturePt.X, originFeaturePt.Y, best.dist);
 		CommonUtils::print_msg(fmt);
 	}
 

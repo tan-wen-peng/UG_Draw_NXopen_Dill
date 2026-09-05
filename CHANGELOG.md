@@ -39,6 +39,10 @@
 - 运行时修复2：do_it 不再遍历图纸并 s->Open()（v1 行为会切换工作活动图纸），
   改为只读当前活动图纸（CurrentDrawingSheet()，空则 UF_DRAW_ask_current_drawing
   兜底），剖视图仅在本图纸上查找；当前图纸无剖视图时提示手动激活而非切换。
+- 运行时修复3（坐标空间）：UF_UI_point_construct 在制图成员视图内拾取返回图纸
+  坐标，与 UF_MODL_ask_curve_props 的绝对模型坐标不同空间，原点吸附永远失败
+  （最近距离停在初始容差值）；改为 UF_VIEW_map_drawing_to_model(sectionView)
+  映射后匹配，原始/映射两路匹配取优。
 
 ## [1.5.0] - 2026-09-01 —— Step9 v7 草图复用（曲线级幂等）
 
