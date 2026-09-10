@@ -63,3 +63,7 @@ Desktop.ini
 
 # 历史调试产物归档目录（确认无用后可整体删除）
 /_archive/
+
+# IDE temp
+.qoder/
+_tmp_*
