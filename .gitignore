@@ -67,3 +67,6 @@ Desktop.ini
 # IDE temp
 .qoder/
 _tmp_*
+
+# WorkBuddy workspace memory (per-machine, do not commit)
+.workbuddy/
